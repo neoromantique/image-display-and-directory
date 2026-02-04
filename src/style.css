@@ -1,0 +1,428 @@
+/* idxd Terminal Aesthetic CSS
+ * Rules: No rounded corners, no shadows, outlined buttons, no gradients
+ */
+
+/* Color definitions */
+@define-color bg_primary #0a0a0a;
+@define-color bg_secondary #121212;
+@define-color bg_tertiary #1a1a1a;
+@define-color border_color #333333;
+@define-color border_hover #555555;
+@define-color text_primary #e0e0e0;
+@define-color text_secondary #888888;
+@define-color text_muted #555555;
+@define-color accent_primary #00ff88;
+@define-color accent_secondary #00ccff;
+@define-color error_color #ff4444;
+
+/* Global reset - no rounded corners, no shadows */
+* {
+    border-radius: 0;
+    box-shadow: none;
+    background-image: none;
+}
+
+/* Main window */
+window {
+    background-color: @bg_primary;
+    color: @text_primary;
+}
+
+/* ListView and scrolled window */
+scrolledwindow {
+    background-color: transparent;
+}
+
+scrolledwindow undershoot,
+scrolledwindow overshoot {
+    background: none;
+}
+
+/* ListView styling */
+listview {
+    background-color: @bg_primary;
+    color: @text_primary;
+}
+
+listview > row {
+    background-color: transparent;
+    padding: 0;
+    margin: 0;
+    border: none;
+}
+
+listview > row:hover {
+    background-color: transparent;
+}
+
+listview > row:selected {
+    background-color: transparent;
+}
+
+/* Row container - horizontal box for media items */
+.media-row {
+    background-color: @bg_primary;
+    padding: 1px;
+    margin: 0;
+    border: none;
+}
+
+/* Individual media item container */
+.media-item {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+    margin: 1px;
+    padding: 0;
+}
+
+.media-item:hover {
+    border-color: @border_hover;
+}
+
+.media-item:selected,
+.media-item.selected {
+    border-color: @accent_primary;
+    border-style: dashed;
+}
+
+/* Picture widget inside media item */
+.media-item picture {
+    background-color: @bg_tertiary;
+}
+
+.video-badge {
+    background-color: alpha(@bg_primary, 0.85);
+    border: 1px solid @border_color;
+    color: @accent_secondary;
+    padding: 1px 4px;
+    font-family: monospace;
+    font-size: 10px;
+}
+
+/* Placeholder styling */
+.placeholder {
+    background-color: @bg_tertiary;
+    border: 1px solid @border_color;
+}
+
+/* Button styling - outlined, not filled */
+button {
+    background-color: transparent;
+    border: 1px solid @border_color;
+    color: @text_primary;
+    padding: 6px 12px;
+    min-height: 0;
+    min-width: 0;
+}
+
+button:hover {
+    background-color: alpha(@text_primary, 0.05);
+    border-color: @border_hover;
+}
+
+button:active {
+    background-color: alpha(@text_primary, 0.10);
+    border-style: dashed;
+}
+
+button:focus {
+    border-color: @accent_primary;
+    outline: none;
+}
+
+button:disabled {
+    color: @text_muted;
+    border-color: @text_muted;
+}
+
+/* Primary button variant */
+button.btn-primary {
+    background-color: transparent;
+    border: 1px solid @accent_primary;
+    color: @accent_primary;
+}
+
+button.btn-primary:hover {
+    background-color: alpha(@accent_primary, 0.10);
+    border-color: @accent_primary;
+}
+
+/* Secondary button variant */
+button.btn-secondary {
+    background-color: transparent;
+    border: 1px solid @accent_secondary;
+    color: @accent_secondary;
+}
+
+button.btn-secondary:hover {
+    background-color: alpha(@accent_secondary, 0.10);
+    border-color: @accent_secondary;
+}
+
+/* Card/Panel styling */
+.card,
+.panel {
+    border: 1px solid @border_color;
+    background-color: @bg_secondary;
+}
+
+.card:hover,
+.panel:hover {
+    border-color: @border_hover;
+}
+
+/* Header bar - minimal terminal style */
+headerbar {
+    background-color: @bg_secondary;
+    border-bottom: 1px solid @border_color;
+    padding: 4px;
+    min-height: 36px;
+}
+
+headerbar title {
+    color: @text_primary;
+    font-weight: normal;
+}
+
+/* Scrollbar styling - thin and subtle */
+scrollbar {
+    background-color: @bg_primary;
+}
+
+scrollbar slider {
+    background-color: @border_color;
+    border: none;
+    min-width: 6px;
+    min-height: 6px;
+}
+
+scrollbar slider:hover {
+    background-color: @border_hover;
+}
+
+scrollbar slider:active {
+    background-color: @text_secondary;
+}
+
+/* Label styling */
+label {
+    color: @text_primary;
+}
+
+label.muted {
+    color: @text_muted;
+}
+
+label.section-title {
+    color: @text_secondary;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+/* Small labels - uppercase, muted */
+label.label-small {
+    color: @text_muted;
+    font-size: 10px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* Keybinding hints */
+.keybind {
+    font-family: monospace;
+    color: @text_secondary;
+    padding: 2px 4px;
+    border: 1px solid @border_color;
+    background-color: @bg_tertiary;
+}
+
+/* Entry/input styling */
+entry {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+    color: @text_primary;
+    padding: 6px 8px;
+}
+
+entry:focus {
+    border-color: @accent_primary;
+    outline: none;
+}
+
+/* Separator */
+separator {
+    background-color: @border_color;
+    min-width: 1px;
+    min-height: 1px;
+}
+
+/* Progress bar */
+progressbar trough {
+    background-color: @bg_tertiary;
+    border: 1px solid @border_color;
+    min-height: 4px;
+}
+
+progressbar progress {
+    background-color: @accent_primary;
+    border: none;
+}
+
+/* Tooltip styling */
+tooltip {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+    color: @text_primary;
+}
+
+/* Viewer overlay styling */
+.viewer-overlay {
+    background-color: @bg_primary;
+}
+
+.viewer-overlay picture,
+.viewer-image {
+    background-color: @bg_primary;
+}
+
+/* Keep GTK Video's internals visually neutral; app provides external controls */
+.viewer-video {
+    background-color: @bg_primary;
+}
+
+.viewer-video button,
+.viewer-video scale,
+.viewer-video revealer,
+.viewer-video box {
+    opacity: 0;
+}
+
+.viewer-image.preview-loading {
+    opacity: 0.72;
+    transition: opacity 140ms ease-out;
+    animation: viewer-preview-pulse 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes viewer-preview-pulse {
+    from { opacity: 0.62; }
+    to { opacity: 0.86; }
+}
+
+.viewer-controls {
+    background-color: alpha(@bg_secondary, 0.95);
+    border: 1px solid @border_color;
+    padding: 8px 12px;
+    margin: 8px;
+}
+
+.viewer-controls button {
+    padding: 4px 8px;
+    min-width: 32px;
+}
+
+.viewer-controls separator {
+    margin: 0 4px;
+    background-color: @border_color;
+}
+
+.viewer-controls label {
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.viewer-controls label.muted {
+    color: @text_secondary;
+}
+
+/* Status bar */
+.status-bar {
+    background-color: @bg_secondary;
+    border-top: 1px solid @border_color;
+    padding: 4px 8px;
+    color: @text_secondary;
+    font-size: 11px;
+}
+
+/* Error state */
+.error {
+    border-color: @error_color;
+}
+
+.error-text {
+    color: @error_color;
+}
+
+/* Loading indicator */
+.loading {
+    border-color: @accent_secondary;
+    border-style: dashed;
+}
+
+/* Grid selection indicator */
+.grid-selected {
+    border: 2px solid @accent_primary;
+    border-style: solid;
+}
+
+.grid-focused {
+    border-color: @accent_secondary;
+    border-style: dashed;
+}
+
+/* List item prefix styling (use "> " instead of emoji) */
+.list-item {
+    padding-left: 16px;
+}
+
+/* Monospace text for paths and technical info */
+.monospace {
+    font-family: monospace;
+}
+
+/* Active state indicator */
+.active {
+    border-color: @accent_primary;
+    border-width: 2px;
+}
+
+.active label {
+    color: @accent_primary;
+}
+
+/* Toggle states - use text rather than visual indicators */
+.toggle-on {
+    border-color: @accent_primary;
+    color: @accent_primary;
+}
+
+.toggle-off {
+    border-color: @border_color;
+    color: @text_muted;
+}
+
+/* Navigation hints */
+.nav-hint {
+    color: @text_muted;
+    font-size: 10px;
+    font-family: monospace;
+}
+
+/* Overlay dimming for viewer */
+.overlay-dim {
+    background-color: alpha(@bg_primary, 0.90);
+}
+
+/* Focus visible indicator */
+*:focus-visible {
+    outline: 1px dashed @accent_primary;
+    outline-offset: 2px;
+}
+
+/* Remove default GTK focus styles */
+*:focus {
+    outline-style: none;
+    box-shadow: none;
+}
