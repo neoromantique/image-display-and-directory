@@ -2,7 +2,7 @@
 
 `idxd` is a local desktop media browser for Linux.
 
-![idxd logo](assets/logo.jpg)
+<img src="assets/logo.jpg" alt="idxd logo" width="128" />
 
 ## What It Does
 
