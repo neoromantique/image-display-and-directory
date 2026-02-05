@@ -28,7 +28,13 @@ impl Default for JustifiedLayout {
 }
 
 impl JustifiedLayout {
-    fn row_height_that_fits(&self, sum_ar: f32, num_gaps: f32, viewport_width: f32, last_row: bool) -> f32 {
+    fn row_height_that_fits(
+        &self,
+        sum_ar: f32,
+        num_gaps: f32,
+        viewport_width: f32,
+        last_row: bool,
+    ) -> f32 {
         let available_width = (viewport_width - num_gaps * self.gap).max(1.0);
         let fit_height = (available_width / sum_ar).max(1.0);
 
@@ -38,9 +44,10 @@ impl JustifiedLayout {
 
         // Normal rows prefer the configured clamp range, but must never overflow.
         let mut row_height = fit_height.clamp(self.min_height, self.max_height);
-        let total_width = sum_ar * row_height + num_gaps * self.gap;
-        if total_width > viewport_width + 0.5 {
-            row_height = fit_height.min(self.max_height);
+        // Hard cap to ensure sum(widths) never exceeds available width.
+        let max_fit_height = (available_width / sum_ar).max(1.0);
+        if row_height > max_fit_height {
+            row_height = max_fit_height;
         }
         row_height.max(1.0)
     }

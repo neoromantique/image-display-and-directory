@@ -69,6 +69,7 @@ pub use row_model_object::RowModelObject;
 /// for displaying rows of media items
 pub struct MediaListView {
     scrolled_window: ScrolledWindow,
+    list_view: ListView,
     model: gio::ListStore,
     // Track visible range for thumbnail loading optimization
     visible_range: Rc<RefCell<(u32, u32)>>,
@@ -150,19 +151,27 @@ impl MediaListView {
         list_view.set_single_click_activate(false);
         list_view.set_enable_rubberband(false);
         list_view.add_css_class("media-list-view");
+        list_view.set_halign(gtk4::Align::Fill);
+        list_view.set_hexpand(true);
+        list_view.set_vexpand(true);
 
         // Wrap in ScrolledWindow for scrolling
         let scrolled_window = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
             .vscrollbar_policy(PolicyType::Automatic)
             .kinetic_scrolling(true)
+            .propagate_natural_width(false)
+            .propagate_natural_height(false)
             .child(&list_view)
             .build();
+        scrolled_window.set_min_content_width(0);
+        scrolled_window.set_min_content_height(0);
 
         let visible_range = Rc::new(RefCell::new((0u32, 0u32)));
 
         Self {
             scrolled_window,
+            list_view,
             model,
             visible_range,
             on_item_activated,
@@ -172,6 +181,38 @@ impl MediaListView {
     /// Get the scrolled window widget to add to the window
     pub fn widget(&self) -> &ScrolledWindow {
         &self.scrolled_window
+    }
+
+    /// Get the content width available to the list view (excludes scrollbars).
+    pub fn content_width(&self) -> f32 {
+        let list_alloc = self.list_view.allocation().width() as f32;
+        let scrolled_alloc = self.scrolled_window.allocation().width() as f32;
+        let mut width = if scrolled_alloc > 0.0 {
+            scrolled_alloc
+        } else {
+            list_alloc
+        };
+        if width <= 0.0 {
+            return 0.0;
+        }
+
+        let vscrollbar = self.scrolled_window.vscrollbar();
+        if vscrollbar.is_visible() {
+            let vscrollbar_width = vscrollbar.allocated_width() as f32;
+            width = (width - vscrollbar_width).max(0.0);
+        }
+
+        width
+    }
+
+    /// Debug helper for tracking allocation and scrollbar changes.
+    pub fn debug_allocations(&self) -> (i32, i32, i32, bool) {
+        let list_alloc = self.list_view.allocation().width();
+        let scrolled_alloc = self.scrolled_window.allocation().width();
+        let vscrollbar = self.scrolled_window.vscrollbar();
+        let vscrollbar_width = vscrollbar.allocated_width();
+        let vscrollbar_visible = vscrollbar.is_visible();
+        (list_alloc, scrolled_alloc, vscrollbar_width, vscrollbar_visible)
     }
 
     /// Get the underlying model
@@ -232,6 +273,17 @@ impl MediaListView {
                 drop(range);
                 callback(first_visible, last_visible);
             }
+        });
+    }
+
+    /// Notify when the vertical scrollbar visibility changes.
+    pub fn connect_vscrollbar_visibility_changed<F>(&self, callback: F)
+    where
+        F: Fn(bool) + 'static,
+    {
+        let vscrollbar = self.scrolled_window.vscrollbar();
+        vscrollbar.connect_notify_local(Some("visible"), move |scrollbar, _| {
+            callback(scrollbar.is_visible());
         });
     }
 

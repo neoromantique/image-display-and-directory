@@ -198,6 +198,30 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
+    fn effective_layout_width(
+        viewport_width: f32,
+        list_alloc: i32,
+        window_alloc: i32,
+        fallback: f32,
+    ) -> f32 {
+        let mut width = if viewport_width > 100.0 {
+            viewport_width
+        } else {
+            fallback
+        };
+        let cap = if list_alloc > 0 {
+            list_alloc as f32
+        } else if window_alloc > 0 {
+            window_alloc as f32
+        } else {
+            0.0
+        };
+        if cap > 0.0 {
+            width = width.min(cap);
+        }
+        width
+    }
+
     pub fn new(app: &Application, initial_path: Option<&Path>) -> Rc<Self> {
         // Load CSS before creating widgets
         load_css();
@@ -313,6 +337,16 @@ impl MainWindow {
 
         // Set up visible range callback for thumbnail loading
         main_window.setup_visible_range_callback();
+
+        // Recompute grid rows when scrollbar visibility changes (content width changes).
+        let window_weak = Rc::downgrade(&main_window);
+        main_window
+            .list_view
+            .connect_vscrollbar_visibility_changed(move |_visible| {
+                if let Some(window) = window_weak.upgrade() {
+                    window.schedule_grid_relayout();
+                }
+            });
 
         // Connect parent button
         let window_weak = Rc::downgrade(&main_window);
@@ -560,12 +594,26 @@ impl MainWindow {
             return;
         }
 
-        let viewport_width = self.list_view.widget().width() as f32;
-        let effective_width = if viewport_width > 100.0 {
-            viewport_width
-        } else {
-            self.window.width().max(1200) as f32
-        };
+        let viewport_width = self.list_view.content_width();
+        let (list_alloc, scrolled_alloc, vscrollbar_width, vscrollbar_visible) =
+            self.list_view.debug_allocations();
+        let window_alloc = self.window.allocation().width();
+        tracing::debug!(
+            "layout-widths content={:.1} list_alloc={} scrolled_alloc={} vscrollbar={} visible={} window_alloc={} window_width={}",
+            viewport_width,
+            list_alloc,
+            scrolled_alloc,
+            vscrollbar_width,
+            vscrollbar_visible,
+            window_alloc,
+            self.window.width()
+        );
+        let effective_width = Self::effective_layout_width(
+            viewport_width,
+            list_alloc,
+            window_alloc,
+            self.window.width().max(1200) as f32,
+        );
 
         let rows = JustifiedLayout::default().compute(&items, effective_width);
         let mut flat_paths = Vec::new();
@@ -641,12 +689,22 @@ impl MainWindow {
     pub fn load_directory(&self, path: &Path) {
         self.set_status(&format!("> Scanning: {}", path.display()));
         self.set_current_path(Some(path.to_path_buf()));
-        let viewport_width = self.list_view.widget().width() as f32;
-        let effective_width = if viewport_width > 100.0 {
-            viewport_width
-        } else {
-            1200.0 // Default width if not yet sized
-        };
+        let viewport_width = self.list_view.content_width();
+        let (list_alloc, scrolled_alloc, vscrollbar_width, vscrollbar_visible) =
+            self.list_view.debug_allocations();
+        let window_alloc = self.window.allocation().width();
+        tracing::debug!(
+            "layout-widths content={:.1} list_alloc={} scrolled_alloc={} vscrollbar={} visible={} window_alloc={} window_width={}",
+            viewport_width,
+            list_alloc,
+            scrolled_alloc,
+            vscrollbar_width,
+            vscrollbar_visible,
+            window_alloc,
+            self.window.width()
+        );
+        let effective_width =
+            Self::effective_layout_width(viewport_width, list_alloc, window_alloc, 1200.0);
         let generation = self.scan_generation.get().wrapping_add(1);
         self.scan_generation.set(generation);
 
@@ -767,5 +825,29 @@ mod tests {
         // This doesn't require GTK initialization
         assert!(!FALLBACK_CSS.is_empty());
         assert!(FALLBACK_CSS.contains("border-radius: 0"));
+    }
+
+    #[test]
+    fn effective_layout_width_prefers_viewport_but_clamps_to_list_alloc() {
+        let width = MainWindow::effective_layout_width(1400.0, 1200, 1280, 1200.0);
+        assert!((width - 1200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn effective_layout_width_clamps_to_window_alloc_when_list_alloc_missing() {
+        let width = MainWindow::effective_layout_width(1400.0, 0, 1280, 1200.0);
+        assert!((width - 1280.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn effective_layout_width_uses_fallback_when_viewport_uninitialized() {
+        let width = MainWindow::effective_layout_width(0.0, 0, 0, 1200.0);
+        assert!((width - 1200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn effective_layout_width_fallback_is_still_clamped() {
+        let width = MainWindow::effective_layout_width(0.0, 1100, 0, 1200.0);
+        assert!((width - 1100.0).abs() < 0.01);
     }
 }
