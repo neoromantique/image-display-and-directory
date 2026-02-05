@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=idxd
+GenericName=Media Browser
+Comment=Browse local folders of images and videos
+Exec=idxd %u
+Icon=lt.gtw.idxd
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=inode/directory;image/jpeg;image/png;image/webp;image/gif;image/bmp;image/tiff;video/mp4;video/webm;video/x-matroska;video/quicktime;video/x-msvideo;
+StartupNotify=true

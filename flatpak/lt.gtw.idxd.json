@@ -1,0 +1,49 @@
+{
+  "id": "lt.gtw.idxd",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "idxd",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--filesystem=home"
+  ],
+  "modules": [
+    {
+      "name": "idxd",
+      "buildsystem": "simple",
+      "build-options": {
+        "prepend-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+          "CARGO_HOME": "/run/build/idxd/cargo"
+        }
+      },
+      "build-commands": [
+        "cargo build --release --locked --offline",
+        "install -Dm755 target/release/idxd /app/bin/idxd",
+        "install -Dm644 data/lt.gtw.idxd.desktop /app/share/applications/lt.gtw.idxd.desktop",
+        "install -Dm644 data/lt.gtw.idxd.metainfo.xml /app/share/metainfo/lt.gtw.idxd.metainfo.xml",
+        "install -Dm644 data/icons/hicolor/scalable/apps/lt.gtw.idxd.svg /app/share/icons/hicolor/scalable/apps/lt.gtw.idxd.svg"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".."
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/share/man",
+    "/share/doc",
+    "/share/gtk-doc"
+  ]
+}

@@ -89,8 +89,7 @@ impl ThumbnailGenerator {
 
     /// Load an image from disk, handling various formats.
     fn load_image(path: &Path) -> Result<DynamicImage> {
-        // Use image::open which auto-detects format
-        let img = image::open(path).with_context(|| format!("Failed to load image: {:?}", path))?;
+        let img = crate::image_loader::open_image(path)?;
 
         Ok(img)
     }

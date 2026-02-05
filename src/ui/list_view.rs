@@ -5,7 +5,8 @@ use glib::Object;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{
-    gio, glib, ListItem, ListView, NoSelection, PolicyType, ScrolledWindow, SignalListItemFactory,
+    gdk, gio, glib, ListItem, ListView, NoSelection, PolicyType, ScrolledWindow,
+    SignalListItemFactory, Widget,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -73,7 +74,11 @@ pub struct MediaListView {
     model: gio::ListStore,
     // Track visible range for thumbnail loading optimization
     visible_range: Rc<RefCell<(u32, u32)>>,
+    selection: Rc<RefCell<(u32, u32)>>,
+    row_widgets: Rc<RefCell<Vec<glib::WeakRef<RowWidget>>>>,
     on_item_activated: Rc<RefCell<Option<Box<dyn Fn(u32, u32, PathBuf)>>>>,
+    on_item_context_menu:
+        Rc<RefCell<Option<Box<dyn Fn(u32, u32, PathBuf, Widget, gdk::Rectangle)>>>>,
 }
 
 impl MediaListView {
@@ -91,23 +96,41 @@ impl MediaListView {
         let on_item_activated: Rc<RefCell<Option<Box<dyn Fn(u32, u32, PathBuf)>>>> =
             Rc::new(RefCell::new(None));
         let on_item_activated_setup = on_item_activated.clone();
+        let on_item_context_menu: Rc<
+            RefCell<Option<Box<dyn Fn(u32, u32, PathBuf, Widget, gdk::Rectangle)>>>,
+        > = Rc::new(RefCell::new(None));
+        let on_item_context_menu_setup = on_item_context_menu.clone();
+        let row_widgets: Rc<RefCell<Vec<glib::WeakRef<RowWidget>>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let row_widgets_setup = row_widgets.clone();
+        let selection: Rc<RefCell<(u32, u32)>> = Rc::new(RefCell::new((0, 0)));
+        let selection_bind = selection.clone();
 
         factory.connect_setup(move |_factory, list_item| {
             let list_item = list_item
                 .downcast_ref::<ListItem>()
                 .expect("ListItem expected");
             let row_widget = RowWidget::new();
+            row_widgets_setup
+                .borrow_mut()
+                .push(row_widget.downgrade());
             let on_item_activated = on_item_activated_setup.clone();
+            let on_item_context_menu = on_item_context_menu_setup.clone();
             row_widget.connect_item_activated(move |row, col, path| {
                 if let Some(ref callback) = *on_item_activated.borrow() {
                     callback(row, col, path);
+                }
+            });
+            row_widget.connect_item_context_menu(move |row, col, path, widget, rect| {
+                if let Some(ref callback) = *on_item_context_menu.borrow() {
+                    callback(row, col, path, widget, rect);
                 }
             });
             list_item.set_child(Some(&row_widget));
         });
 
         // Bind: update the widget when data is bound to it
-        factory.connect_bind(|_factory, list_item| {
+        factory.connect_bind(move |_factory, list_item| {
             let list_item = list_item
                 .downcast_ref::<ListItem>()
                 .expect("ListItem expected");
@@ -125,6 +148,8 @@ impl MediaListView {
             if let Some(row_model) = row_model_obj.row_model() {
                 row_widget.bind(&row_model);
             }
+            let (row, col) = *selection_bind.borrow();
+            row_widget.update_selection(row, col);
         });
 
         // Unbind: clean up when data is unbound
@@ -157,7 +182,7 @@ impl MediaListView {
 
         // Wrap in ScrolledWindow for scrolling
         let scrolled_window = ScrolledWindow::builder()
-            .hscrollbar_policy(PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Automatic)
             .vscrollbar_policy(PolicyType::Automatic)
             .kinetic_scrolling(true)
             .propagate_natural_width(false)
@@ -174,7 +199,10 @@ impl MediaListView {
             list_view,
             model,
             visible_range,
+            selection,
+            row_widgets,
             on_item_activated,
+            on_item_context_menu,
         }
     }
 
@@ -185,21 +213,18 @@ impl MediaListView {
 
     /// Get the content width available to the list view (excludes scrollbars).
     pub fn content_width(&self) -> f32 {
-        let list_alloc = self.list_view.allocation().width() as f32;
-        let scrolled_alloc = self.scrolled_window.allocation().width() as f32;
-        let mut width = if scrolled_alloc > 0.0 {
-            scrolled_alloc
-        } else {
-            list_alloc
-        };
-        if width <= 0.0 {
+        let scrolled_alloc = self.scrolled_window.width() as f32;
+        if scrolled_alloc <= 0.0 {
             return 0.0;
         }
+        let mut width = scrolled_alloc;
 
         let vscrollbar = self.scrolled_window.vscrollbar();
         if vscrollbar.is_visible() {
-            let vscrollbar_width = vscrollbar.allocated_width() as f32;
-            width = (width - vscrollbar_width).max(0.0);
+            let vscrollbar_width = vscrollbar.width() as f32;
+            if vscrollbar_width > 0.0 {
+                width = (width - vscrollbar_width).max(0.0);
+            }
         }
 
         width
@@ -207,12 +232,17 @@ impl MediaListView {
 
     /// Debug helper for tracking allocation and scrollbar changes.
     pub fn debug_allocations(&self) -> (i32, i32, i32, bool) {
-        let list_alloc = self.list_view.allocation().width();
-        let scrolled_alloc = self.scrolled_window.allocation().width();
+        let list_alloc = self.list_view.width();
+        let scrolled_alloc = self.scrolled_window.width();
         let vscrollbar = self.scrolled_window.vscrollbar();
-        let vscrollbar_width = vscrollbar.allocated_width();
+        let vscrollbar_width = vscrollbar.width();
         let vscrollbar_visible = vscrollbar.is_visible();
-        (list_alloc, scrolled_alloc, vscrollbar_width, vscrollbar_visible)
+        (
+            list_alloc,
+            scrolled_alloc,
+            vscrollbar_width,
+            vscrollbar_visible,
+        )
     }
 
     /// Get the underlying model
@@ -224,6 +254,19 @@ impl MediaListView {
     pub fn set_rows(&self, rows: Vec<RowModel>) {
         let objects: Vec<RowModelObject> = rows.into_iter().map(RowModelObject::new).collect();
         self.model.splice(0, self.model.n_items(), &objects);
+    }
+
+    pub fn set_selection(&self, row: u32, col: u32) {
+        *self.selection.borrow_mut() = (row, col);
+        let mut widgets = self.row_widgets.borrow_mut();
+        widgets.retain(|weak| {
+            if let Some(widget) = weak.upgrade() {
+                widget.update_selection(row, col);
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Get the number of rows
@@ -292,6 +335,13 @@ impl MediaListView {
         F: Fn(u32, u32, PathBuf) + 'static,
     {
         *self.on_item_activated.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn connect_item_context_menu<F>(&self, callback: F)
+    where
+        F: Fn(u32, u32, PathBuf, Widget, gdk::Rectangle) + 'static,
+    {
+        *self.on_item_context_menu.borrow_mut() = Some(Box::new(callback));
     }
 }
 

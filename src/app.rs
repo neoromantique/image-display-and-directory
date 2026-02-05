@@ -3,7 +3,7 @@ use gtk4::{gio, Application};
 
 use crate::ui::MainWindow;
 
-const APP_ID: &str = "com.idxd.MediaBrowser";
+const APP_ID: &str = "lt.gtw.idxd";
 
 pub struct IdxdApp {
     app: Application,

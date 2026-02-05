@@ -8,7 +8,6 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::ImageReader;
 use tracing::{debug, trace, warn};
 
 use crate::models::MediaType;
@@ -95,20 +94,13 @@ impl MetadataExtractor {
     fn extract_image_dimensions(path: &Path) -> Result<(u32, u32)> {
         trace!("Extracting image dimensions from {:?}", path);
 
-        // Try to read dimensions without decoding the full image
-        match ImageReader::open(path) {
-            Ok(reader) => match reader.into_dimensions() {
-                Ok((width, height)) => {
-                    trace!("Got dimensions {}x{} for {:?}", width, height, path);
-                    Ok((width, height))
-                }
-                Err(e) => {
-                    warn!("Failed to read image dimensions for {:?}: {}", path, e);
-                    Ok((ERROR_DIMENSION, ERROR_DIMENSION))
-                }
-            },
+        match crate::image_loader::read_dimensions(path) {
+            Ok((width, height)) => {
+                trace!("Got dimensions {}x{} for {:?}", width, height, path);
+                Ok((width, height))
+            }
             Err(e) => {
-                warn!("Failed to open image {:?}: {}", path, e);
+                warn!("Failed to read image dimensions for {:?}: {}", path, e);
                 Ok((ERROR_DIMENSION, ERROR_DIMENSION))
             }
         }

@@ -7,6 +7,11 @@
 // - Escape: Close viewer, return to grid
 // - Space: Play/pause (video) or toggle UI visibility
 // - f: Toggle fullscreen
+// - o: Open directory
+// - r: Toggle recursive scan
+// - s: Toggle shuffle
+// - +: Toggle favorite
+// - Delete: Delete file
 
 use gdk4::Key;
 use gtk4::prelude::*;
@@ -161,6 +166,17 @@ pub type ToggleUiCallback = Box<dyn Fn()>;
 /// Callback type for fullscreen toggle
 pub type ToggleFullscreenCallback = Box<dyn Fn()>;
 
+/// Callback type for opening a directory prompt
+pub type OpenDirectoryCallback = Box<dyn Fn()>;
+/// Callback type for toggling recursive scan
+pub type ToggleRecursiveCallback = Box<dyn Fn()>;
+/// Callback type for toggling shuffle
+pub type ToggleShuffleCallback = Box<dyn Fn()>;
+/// Callback type for toggling favorite
+pub type ToggleFavoriteCallback = Box<dyn Fn()>;
+/// Callback type for deleting selected file
+pub type DeleteSelectedCallback = Box<dyn Fn()>;
+
 /// Keybinding manager for the media browser
 pub struct Keybindings {
     controller: EventControllerKey,
@@ -173,6 +189,11 @@ pub struct Keybindings {
     on_play_pause: Rc<RefCell<Option<PlayPauseCallback>>>,
     on_toggle_ui: Rc<RefCell<Option<ToggleUiCallback>>>,
     on_toggle_fullscreen: Rc<RefCell<Option<ToggleFullscreenCallback>>>,
+    on_open_directory: Rc<RefCell<Option<OpenDirectoryCallback>>>,
+    on_toggle_recursive: Rc<RefCell<Option<ToggleRecursiveCallback>>>,
+    on_toggle_shuffle: Rc<RefCell<Option<ToggleShuffleCallback>>>,
+    on_toggle_favorite: Rc<RefCell<Option<ToggleFavoriteCallback>>>,
+    on_delete_selected: Rc<RefCell<Option<DeleteSelectedCallback>>>,
     // Path lookup function
     get_path: Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>>,
 }
@@ -194,6 +215,16 @@ impl Keybindings {
         let on_toggle_ui: Rc<RefCell<Option<ToggleUiCallback>>> = Rc::new(RefCell::new(None));
         let on_toggle_fullscreen: Rc<RefCell<Option<ToggleFullscreenCallback>>> =
             Rc::new(RefCell::new(None));
+        let on_open_directory: Rc<RefCell<Option<OpenDirectoryCallback>>> =
+            Rc::new(RefCell::new(None));
+        let on_toggle_recursive: Rc<RefCell<Option<ToggleRecursiveCallback>>> =
+            Rc::new(RefCell::new(None));
+        let on_toggle_shuffle: Rc<RefCell<Option<ToggleShuffleCallback>>> =
+            Rc::new(RefCell::new(None));
+        let on_toggle_favorite: Rc<RefCell<Option<ToggleFavoriteCallback>>> =
+            Rc::new(RefCell::new(None));
+        let on_delete_selected: Rc<RefCell<Option<DeleteSelectedCallback>>> =
+            Rc::new(RefCell::new(None));
         let get_path: Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>> =
             Rc::new(RefCell::new(None));
 
@@ -206,6 +237,11 @@ impl Keybindings {
         let on_play_pause_clone = on_play_pause.clone();
         let on_toggle_ui_clone = on_toggle_ui.clone();
         let on_toggle_fullscreen_clone = on_toggle_fullscreen.clone();
+        let on_open_directory_clone = on_open_directory.clone();
+        let on_toggle_recursive_clone = on_toggle_recursive.clone();
+        let on_toggle_shuffle_clone = on_toggle_shuffle.clone();
+        let on_toggle_favorite_clone = on_toggle_favorite.clone();
+        let on_delete_selected_clone = on_delete_selected.clone();
         let get_path_clone = get_path.clone();
 
         controller.connect_key_pressed(move |_controller, keyval, _keycode, _state| {
@@ -219,6 +255,11 @@ impl Keybindings {
                 &on_play_pause_clone,
                 &on_toggle_ui_clone,
                 &on_toggle_fullscreen_clone,
+                &on_open_directory_clone,
+                &on_toggle_recursive_clone,
+                &on_toggle_shuffle_clone,
+                &on_toggle_favorite_clone,
+                &on_delete_selected_clone,
                 &get_path_clone,
             );
 
@@ -239,6 +280,11 @@ impl Keybindings {
             on_play_pause,
             on_toggle_ui,
             on_toggle_fullscreen,
+            on_open_directory,
+            on_toggle_recursive,
+            on_toggle_shuffle,
+            on_toggle_favorite,
+            on_delete_selected,
             get_path,
         }
     }
@@ -348,6 +394,46 @@ impl Keybindings {
         *self.on_toggle_fullscreen.borrow_mut() = Some(Box::new(callback));
     }
 
+    /// Connect callback for open directory prompt
+    pub fn connect_open_directory<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_open_directory.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Connect callback for toggling recursive scan
+    pub fn connect_toggle_recursive<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_toggle_recursive.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Connect callback for toggling shuffle
+    pub fn connect_toggle_shuffle<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_toggle_shuffle.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Connect callback for toggling favorite
+    pub fn connect_toggle_favorite<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_toggle_favorite.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Connect callback for deleting selected file
+    pub fn connect_delete_selected<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_delete_selected.borrow_mut() = Some(Box::new(callback));
+    }
+
     /// Handle a key press event
     #[allow(clippy::too_many_arguments)]
     fn handle_key_press(
@@ -360,6 +446,11 @@ impl Keybindings {
         on_play_pause: &Rc<RefCell<Option<PlayPauseCallback>>>,
         on_toggle_ui: &Rc<RefCell<Option<ToggleUiCallback>>>,
         on_toggle_fullscreen: &Rc<RefCell<Option<ToggleFullscreenCallback>>>,
+        on_open_directory: &Rc<RefCell<Option<OpenDirectoryCallback>>>,
+        on_toggle_recursive: &Rc<RefCell<Option<ToggleRecursiveCallback>>>,
+        on_toggle_shuffle: &Rc<RefCell<Option<ToggleShuffleCallback>>>,
+        on_toggle_favorite: &Rc<RefCell<Option<ToggleFavoriteCallback>>>,
+        on_delete_selected: &Rc<RefCell<Option<DeleteSelectedCallback>>>,
         get_path: &Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>>,
     ) -> bool {
         let mode = view_mode.get();
@@ -419,6 +510,46 @@ impl Keybindings {
                 callback();
             }
             return true;
+        }
+
+        // Handle open directory prompt
+        if keyval == Key::o || keyval == Key::O {
+            if let Some(ref callback) = *on_open_directory.borrow() {
+                callback();
+                return true;
+            }
+        }
+
+        // Handle recursive toggle
+        if keyval == Key::r || keyval == Key::R {
+            if let Some(ref callback) = *on_toggle_recursive.borrow() {
+                callback();
+                return true;
+            }
+        }
+
+        // Handle shuffle toggle
+        if keyval == Key::s || keyval == Key::S {
+            if let Some(ref callback) = *on_toggle_shuffle.borrow() {
+                callback();
+                return true;
+            }
+        }
+
+        // Handle favorite toggle
+        if keyval == Key::plus || keyval == Key::equal || keyval == Key::KP_Add {
+            if let Some(ref callback) = *on_toggle_favorite.borrow() {
+                callback();
+                return true;
+            }
+        }
+
+        // Handle delete
+        if keyval == Key::Delete {
+            if let Some(ref callback) = *on_delete_selected.borrow() {
+                callback();
+                return true;
+            }
         }
 
         // Handle navigation keys (only in grid mode)

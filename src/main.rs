@@ -1,4 +1,5 @@
 mod app;
+mod image_loader;
 mod layout;
 mod models;
 mod ui;

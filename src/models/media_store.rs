@@ -162,6 +162,31 @@ impl MediaStore {
             -- Index for efficient row retrieval
             CREATE INDEX IF NOT EXISTS idx_layout_rows_bucket_sort
                 ON layout_rows(width_bucket, sort_key);
+
+            -- Favorites table
+            CREATE TABLE IF NOT EXISTS favorites (
+                path TEXT PRIMARY KEY NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            -- Albums table
+            CREATE TABLE IF NOT EXISTS albums (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            -- Album items join table
+            CREATE TABLE IF NOT EXISTS album_items (
+                album_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (album_id, path),
+                FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_album_items_path ON album_items(path);
             ",
             )
             .context("Failed to create database tables")?;
@@ -357,6 +382,83 @@ impl MediaStore {
         }
 
         Ok(items)
+    }
+
+    // =========================================================================
+    // Favorites / Albums
+    // =========================================================================
+
+    /// Returns true if the path is marked as favorite.
+    pub fn is_favorite(&self, path: &Path) -> Result<bool> {
+        let path_str = path.to_string_lossy();
+        let exists: Option<i32> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE path = ?1",
+                params![path_str.as_ref()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("Failed to query favorite status")?;
+        Ok(exists.is_some())
+    }
+
+    /// Toggles favorite status for the given path.
+    /// Returns true if the item is now favorited.
+    pub fn toggle_favorite(&self, path: &Path) -> Result<bool> {
+        let path_str = path.to_string_lossy();
+        let now = Self::now();
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO favorites (path, created_at) VALUES (?1, ?2)",
+            params![path_str.as_ref(), now],
+        )?;
+        if inserted > 0 {
+            return Ok(true);
+        }
+        self.conn.execute(
+            "DELETE FROM favorites WHERE path = ?1",
+            params![path_str.as_ref()],
+        )?;
+        Ok(false)
+    }
+
+    /// Returns all albums (id, name) ordered by name.
+    pub fn list_albums(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, name FROM albums ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut albums = Vec::new();
+        for row in rows {
+            albums.push(row?);
+        }
+        Ok(albums)
+    }
+
+    /// Creates a new album (or returns existing id if name already exists).
+    pub fn create_album(&self, name: &str) -> Result<i64> {
+        let now = Self::now();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO albums (name, created_at, updated_at) VALUES (?1, ?2, ?2)",
+            params![name, now],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM albums WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Adds a path to an album (no-op if already present).
+    pub fn add_to_album(&self, album_id: i64, path: &Path) -> Result<bool> {
+        let path_str = path.to_string_lossy();
+        let now = Self::now();
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO album_items (album_id, path, created_at) VALUES (?1, ?2, ?3)",
+            params![album_id, path_str.as_ref(), now],
+        )?;
+        Ok(inserted > 0)
     }
 
     /// Retrieves all media items from the database.

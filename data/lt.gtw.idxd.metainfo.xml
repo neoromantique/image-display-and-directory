@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>lt.gtw.idxd</id>
+  <name>idxd</name>
+  <summary>Local media browser for images and videos</summary>
+  <description>
+    <p>
+      idxd is a keyboard-first media browser for local folders. It displays
+      images and videos in a justified grid and opens a focused viewer for
+      selected items.
+    </p>
+  </description>
+  <launchable type="desktop-id">lt.gtw.idxd.desktop</launchable>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-DoNoEvil-MIT</project_license>
+  <developer_name>neoromantique</developer_name>
+  <url type="homepage">https://github.com/neoromantique/image-display-and-directory</url>
+  <content_rating type="oars-1.1" />
+</component>

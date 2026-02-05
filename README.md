@@ -28,6 +28,20 @@
 cargo run --release -- /path/to/media
 ```
 
+## Flatpak
+
+Build and install locally:
+
+```bash
+flatpak-builder --user --install --force-clean build-dir flatpak/lt.gtw.idxd.json
+```
+
+Run:
+
+```bash
+flatpak run lt.gtw.idxd /path/to/media
+```
+
 ## Project Status
 
 Vibe coded junk to solve a local pain (sorting through lots of fuji photos/vids into tags/status).

@@ -5,15 +5,15 @@
 // - Overlay mode covering the main grid view
 // - Terminal aesthetic: no rounded corners, no shadows, outlined buttons
 
-use gdk4::{MemoryFormat, MemoryTexture, Texture};
+use gdk4::{MemoryFormat, MemoryTexture, Rectangle, Texture};
 use gtk4::gdk::Key;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{
     glib, Align, Box as GtkBox, Button, EventControllerKey, EventControllerMotion,
-    EventControllerScroll, EventControllerScrollFlags, Fixed, GestureDrag, GestureZoom,
-    GraphicsOffloadEnabled, Label, MediaFile, MediaStream, Orientation, Overlay, Picture, Stack,
-    Scale, StackTransitionType, Video, Widget, Window,
+    EventControllerScroll, EventControllerScrollFlags, Fixed, GestureClick, GestureDrag,
+    GestureZoom, GraphicsOffloadEnabled, Label, MediaFile, MediaStream, Orientation, Overlay,
+    Picture, Scale, Stack, StackTransitionType, Video, Widget, Window,
 };
 use image::GenericImageView;
 use lru::LruCache;
@@ -207,6 +207,8 @@ mod imp {
         pub user_interacted: Cell<bool>,
         // Closure to call when viewer is closed
         pub on_close: RefCell<Option<Rc<dyn Fn()>>>,
+        // Context menu callback
+        pub on_context_menu: RefCell<Option<Rc<dyn Fn(PathBuf, Widget, Rectangle)>>>,
         // Loading generation counter (to ignore stale results)
         pub load_generation: Cell<u64>,
         pub load_generation_atomic: Arc<AtomicU64>,
@@ -260,6 +262,7 @@ mod imp {
                 is_loading: Cell::new(false),
                 user_interacted: Cell::new(false),
                 on_close: RefCell::new(None),
+                on_context_menu: RefCell::new(None),
                 load_generation: Cell::new(0),
                 load_generation_atomic: Arc::new(AtomicU64::new(0)),
                 load_sender: RefCell::new(None),
@@ -763,6 +766,19 @@ impl MediaViewer {
         });
 
         overlay.add_controller(drag_gesture);
+
+        // Right-click context menu on overlay
+        let context_click = GestureClick::new();
+        context_click.set_button(3);
+        let viewer_weak = self.downgrade();
+        let overlay_widget: Widget = overlay.clone().upcast();
+        context_click.connect_pressed(move |_, _n, x, y| {
+            if let Some(viewer) = viewer_weak.upgrade() {
+                let rect = Rectangle::new(x as i32, y as i32, 1, 1);
+                viewer.emit_context_menu(&overlay_widget, rect);
+            }
+        });
+        overlay.add_controller(context_click);
 
         // Scroll wheel for zoom on fixed container (same coord space as motion tracking)
         let scroll_controller = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
@@ -1624,9 +1640,27 @@ impl MediaViewer {
         *self.imp().on_close.borrow_mut() = Some(Rc::new(callback));
     }
 
+    /// Set callback for context menu requests
+    pub fn connect_context_menu<F>(&self, callback: F)
+    where
+        F: Fn(PathBuf, Widget, Rectangle) + 'static,
+    {
+        *self.imp().on_context_menu.borrow_mut() = Some(Rc::new(callback));
+    }
+
     /// Get the current path being displayed
     pub fn current_path(&self) -> Option<PathBuf> {
         self.imp().current_path.borrow().clone()
+    }
+
+    fn emit_context_menu(&self, anchor: &Widget, rect: Rectangle) {
+        let imp = self.imp();
+        let Some(path) = imp.current_path.borrow().clone() else {
+            return;
+        };
+        if let Some(ref callback) = *imp.on_context_menu.borrow() {
+            callback(path, anchor.clone(), rect);
+        }
     }
 
     /// Zoom by a factor (1.0 = no change, 2.0 = double, 0.5 = half)
@@ -1873,7 +1907,7 @@ fn format_timestamp(seconds: f64) -> String {
 
 /// Decode an image at downscaled resolution for fast preview
 fn decode_image_downscaled(path: &Path, max_size: u32) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
-    let img = image::open(path).ok()?;
+    let img = crate::image_loader::open_image(path).ok()?;
     let (orig_w, orig_h) = img.dimensions();
 
     // Calculate scale to fit within max_size
@@ -1906,7 +1940,7 @@ fn decode_image_downscaled(path: &Path, max_size: u32) -> Option<(Vec<u8>, u32, 
 
 /// Decode an image at full resolution
 fn decode_image_full(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let img = image::open(path).ok()?;
+    let img = crate::image_loader::open_image(path).ok()?;
     let (width, height) = img.dimensions();
     let rgba = img.to_rgba8();
 

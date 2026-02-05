@@ -7,6 +7,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{
     gdk, glib, Align, Box as GtkBox, ContentFit, GestureClick, Label, Orientation, Overlay, Picture,
+    Widget,
 };
 use image::GenericImageView;
 use std::cell::{Cell, RefCell};
@@ -151,6 +152,7 @@ fn folder_texture() -> &'static Texture {
 #[derive(Debug)]
 struct RowDecodeRequest {
     path: PathBuf,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -176,7 +178,9 @@ struct RowLoaderState {
 
 struct RowImageLoader {
     request_tx: flume::Sender<RowDecodeRequest>,
+    request_rx: flume::Receiver<RowDecodeRequest>,
     result_rx: flume::Receiver<RowDecodeResult>,
+    generation: std::sync::Arc<AtomicU64>,
     state: RefCell<RowLoaderState>,
 }
 
@@ -190,12 +194,17 @@ impl RowImageLoader {
     fn new() -> Rc<Self> {
         let (request_tx, request_rx) = flume::bounded::<RowDecodeRequest>(ROW_LOADER_QUEUE);
         let (result_tx, result_rx) = flume::unbounded::<RowDecodeResult>();
+        let generation = std::sync::Arc::new(AtomicU64::new(1));
 
         for _ in 0..ROW_LOADER_THREADS {
             let rx = request_rx.clone();
             let tx = result_tx.clone();
+            let generation = generation.clone();
             std::thread::spawn(move || {
                 while let Ok(req) = rx.recv() {
+                    if req.generation != generation.load(Ordering::Acquire) {
+                        continue;
+                    }
                     let decoded = decode_row_preview(&req.path);
                     let (rgba, width, height) = match decoded {
                         Some((data, w, h)) => (Some(data), w, h),
@@ -213,7 +222,9 @@ impl RowImageLoader {
 
         let loader = Rc::new(Self {
             request_tx,
+            request_rx,
             result_rx,
+            generation,
             state: RefCell::new(RowLoaderState {
                 pending_paths: HashSet::new(),
                 waiters: HashMap::new(),
@@ -259,10 +270,12 @@ impl RowImageLoader {
             });
 
         if state.pending_paths.insert(path.to_path_buf()) {
+            let generation = self.generation.load(Ordering::Acquire);
             if self
                 .request_tx
                 .try_send(RowDecodeRequest {
                     path: path.to_path_buf(),
+                    generation,
                 })
                 .is_err()
             {
@@ -270,6 +283,15 @@ impl RowImageLoader {
                 state.waiters.remove(path);
             }
         }
+    }
+
+    fn reschedule(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let mut state = self.state.borrow_mut();
+        state.pending_paths.clear();
+        state.waiters.clear();
+        drop(state);
+        while self.request_rx.try_recv().is_ok() {}
     }
 
     fn process_results(&self) {
@@ -301,8 +323,12 @@ impl RowImageLoader {
     }
 }
 
+pub fn reschedule_row_previews() {
+    ROW_IMAGE_LOADER.with(|loader| loader.reschedule());
+}
+
 fn decode_row_preview(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let img = match image::open(path) {
+    let img = match crate::image_loader::open_image(path) {
         Ok(img) => img,
         Err(_) if is_video_path(path) => decode_video_preview(path)?,
         Err(_) => return None,
@@ -327,7 +353,8 @@ fn is_video_path(path: &Path) -> bool {
 
 fn decode_video_preview(path: &Path) -> Option<image::DynamicImage> {
     // Try a frame slightly into the stream first (many videos start with black).
-    ffmpeg_extract_frame(path, "00:00:01.000").or_else(|| ffmpeg_extract_frame(path, "00:00:00.000"))
+    ffmpeg_extract_frame(path, "00:00:01.000")
+        .or_else(|| ffmpeg_extract_frame(path, "00:00:00.000"))
 }
 
 fn ffmpeg_extract_frame(path: &Path, timestamp: &str) -> Option<image::DynamicImage> {
@@ -398,6 +425,8 @@ mod imp {
         pub item_is_folder: RefCell<Vec<bool>>,
         pub row_index: Cell<u32>,
         pub on_item_activated: RefCell<Option<Rc<dyn Fn(u32, u32, PathBuf)>>>,
+        pub on_item_context_menu:
+            RefCell<Option<Rc<dyn Fn(u32, u32, PathBuf, Widget, gdk::Rectangle)>>>,
     }
 
     #[glib::object_subclass]
@@ -415,7 +444,8 @@ mod imp {
             obj.set_orientation(Orientation::Horizontal);
             obj.set_spacing(2);
             obj.set_homogeneous(false);
-            obj.set_halign(Align::Start);
+            obj.set_hexpand(true);
+            obj.set_halign(Align::Fill);
             obj.set_valign(Align::Start);
             obj.add_css_class("media-row");
         }
@@ -527,6 +557,7 @@ impl RowWidget {
         for slot in slots.iter() {
             slot.picture.set_paintable(Some(placeholder_texture()));
             slot.widget.set_visible(false);
+            slot.widget.remove_css_class("selected");
             if let Some(ref label) = slot.label {
                 label.set_visible(false);
             }
@@ -605,11 +636,35 @@ impl RowWidget {
             .unwrap_or(false)
     }
 
+    pub fn update_selection(&self, selected_row: u32, selected_col: u32) {
+        let imp = self.imp();
+        let row = imp.row_index.get();
+        let slots = imp.slots.borrow();
+        for (i, slot) in slots.iter().enumerate() {
+            if !slot.widget.is_visible() {
+                slot.widget.remove_css_class("selected");
+                continue;
+            }
+            if row == selected_row && i == selected_col as usize {
+                slot.widget.add_css_class("selected");
+            } else {
+                slot.widget.remove_css_class("selected");
+            }
+        }
+    }
+
     pub fn connect_item_activated<F>(&self, callback: F)
     where
         F: Fn(u32, u32, PathBuf) + 'static,
     {
         *self.imp().on_item_activated.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    pub fn connect_item_context_menu<F>(&self, callback: F)
+    where
+        F: Fn(u32, u32, PathBuf, Widget, gdk::Rectangle) + 'static,
+    {
+        *self.imp().on_item_context_menu.borrow_mut() = Some(Rc::new(callback));
     }
 
     fn create_item_slot(&self, index: u32) -> imp::ItemSlot {
@@ -656,6 +711,17 @@ impl RowWidget {
         });
         overlay.add_controller(click);
 
+        // Add right-click context menu handler
+        let row_widget = self.clone();
+        let overlay_widget: Widget = overlay.clone().upcast();
+        let context_click = GestureClick::new();
+        context_click.set_button(3);
+        context_click.connect_pressed(move |_, _n, x, y| {
+            let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            row_widget.emit_item_context_menu(index, &overlay_widget, rect);
+        });
+        overlay.add_controller(context_click);
+
         imp::ItemSlot {
             widget: overlay.clone().upcast(),
             picture,
@@ -671,6 +737,16 @@ impl RowWidget {
         if let Some(path) = imp.item_paths.borrow().get(index as usize).cloned() {
             if let Some(ref callback) = *imp.on_item_activated.borrow() {
                 callback(row, index, path);
+            }
+        }
+    }
+
+    fn emit_item_context_menu(&self, index: u32, anchor: &Widget, rect: gdk::Rectangle) {
+        let imp = self.imp();
+        let row = imp.row_index.get();
+        if let Some(path) = imp.item_paths.borrow().get(index as usize).cloned() {
+            if let Some(ref callback) = *imp.on_item_context_menu.borrow() {
+                callback(row, index, path, anchor.clone(), rect);
             }
         }
     }
