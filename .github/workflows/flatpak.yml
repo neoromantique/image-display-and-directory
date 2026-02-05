@@ -27,7 +27,7 @@ jobs:
 
       - name: Install SDKs
         run: |
-          sudo flatpak install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49
+          sudo flatpak install -y flathub org.gnome.Platform//48 org.gnome.Sdk//48
           sudo flatpak install -y flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 
       - name: Build Flatpak

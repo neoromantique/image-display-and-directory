@@ -33,6 +33,7 @@ cargo run --release -- /path/to/media
 Build and install locally:
 
 ```bash
+flatpak install -y flathub org.gnome.Platform//48 org.gnome.Sdk//48 org.freedesktop.Sdk.Extension.rust-stable//24.08
 flatpak-builder --user --install --force-clean build-dir flatpak/lt.gtw.idxd.json
 ```
 
