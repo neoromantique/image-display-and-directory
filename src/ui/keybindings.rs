@@ -5,6 +5,7 @@
 // - Arrow keys / hjkl: Navigate grid
 // - Enter: Open viewer for selected item
 // - Escape: Close viewer, return to grid
+// - [ / ]: Rotate image 90 degrees in viewer
 // - Space: Play/pause (video) or toggle UI visibility
 // - f: Toggle fullscreen
 // - o: Open directory
@@ -176,6 +177,8 @@ pub type ToggleShuffleCallback = Box<dyn Fn()>;
 pub type ToggleFavoriteCallback = Box<dyn Fn()>;
 /// Callback type for deleting selected file
 pub type DeleteSelectedCallback = Box<dyn Fn()>;
+/// Callback type for rotating the viewer image
+pub type RotateViewerCallback = Box<dyn Fn()>;
 
 /// Keybinding manager for the media browser
 pub struct Keybindings {
@@ -194,6 +197,8 @@ pub struct Keybindings {
     on_toggle_shuffle: Rc<RefCell<Option<ToggleShuffleCallback>>>,
     on_toggle_favorite: Rc<RefCell<Option<ToggleFavoriteCallback>>>,
     on_delete_selected: Rc<RefCell<Option<DeleteSelectedCallback>>>,
+    on_rotate_ccw: Rc<RefCell<Option<RotateViewerCallback>>>,
+    on_rotate_cw: Rc<RefCell<Option<RotateViewerCallback>>>,
     // Path lookup function
     get_path: Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>>,
 }
@@ -225,6 +230,8 @@ impl Keybindings {
             Rc::new(RefCell::new(None));
         let on_delete_selected: Rc<RefCell<Option<DeleteSelectedCallback>>> =
             Rc::new(RefCell::new(None));
+        let on_rotate_ccw: Rc<RefCell<Option<RotateViewerCallback>>> = Rc::new(RefCell::new(None));
+        let on_rotate_cw: Rc<RefCell<Option<RotateViewerCallback>>> = Rc::new(RefCell::new(None));
         let get_path: Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>> =
             Rc::new(RefCell::new(None));
 
@@ -242,6 +249,8 @@ impl Keybindings {
         let on_toggle_shuffle_clone = on_toggle_shuffle.clone();
         let on_toggle_favorite_clone = on_toggle_favorite.clone();
         let on_delete_selected_clone = on_delete_selected.clone();
+        let on_rotate_ccw_clone = on_rotate_ccw.clone();
+        let on_rotate_cw_clone = on_rotate_cw.clone();
         let get_path_clone = get_path.clone();
 
         controller.connect_key_pressed(move |_controller, keyval, _keycode, _state| {
@@ -260,6 +269,8 @@ impl Keybindings {
                 &on_toggle_shuffle_clone,
                 &on_toggle_favorite_clone,
                 &on_delete_selected_clone,
+                &on_rotate_ccw_clone,
+                &on_rotate_cw_clone,
                 &get_path_clone,
             );
 
@@ -285,6 +296,8 @@ impl Keybindings {
             on_toggle_shuffle,
             on_toggle_favorite,
             on_delete_selected,
+            on_rotate_ccw,
+            on_rotate_cw,
             get_path,
         }
     }
@@ -434,6 +447,22 @@ impl Keybindings {
         *self.on_delete_selected.borrow_mut() = Some(Box::new(callback));
     }
 
+    /// Connect callback for rotating current image 90 degrees counter-clockwise.
+    pub fn connect_rotate_ccw<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_rotate_ccw.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Connect callback for rotating current image 90 degrees clockwise.
+    pub fn connect_rotate_cw<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.on_rotate_cw.borrow_mut() = Some(Box::new(callback));
+    }
+
     /// Handle a key press event
     #[allow(clippy::too_many_arguments)]
     fn handle_key_press(
@@ -451,6 +480,8 @@ impl Keybindings {
         on_toggle_shuffle: &Rc<RefCell<Option<ToggleShuffleCallback>>>,
         on_toggle_favorite: &Rc<RefCell<Option<ToggleFavoriteCallback>>>,
         on_delete_selected: &Rc<RefCell<Option<DeleteSelectedCallback>>>,
+        on_rotate_ccw: &Rc<RefCell<Option<RotateViewerCallback>>>,
+        on_rotate_cw: &Rc<RefCell<Option<RotateViewerCallback>>>,
         get_path: &Rc<RefCell<Option<Box<dyn Fn(u32, u32) -> Option<PathBuf>>>>>,
     ) -> bool {
         let mode = view_mode.get();
@@ -583,6 +614,19 @@ impl Keybindings {
 
         // Handle viewer navigation (left/right for prev/next)
         if mode == ViewMode::Viewer {
+            if keyval == Key::bracketleft {
+                if let Some(ref callback) = *on_rotate_ccw.borrow() {
+                    callback();
+                    return true;
+                }
+            }
+            if keyval == Key::bracketright {
+                if let Some(ref callback) = *on_rotate_cw.borrow() {
+                    callback();
+                    return true;
+                }
+            }
+
             let direction = match keyval {
                 Key::Left | Key::h => Some(Direction::Left),
                 Key::Right | Key::l => Some(Direction::Right),

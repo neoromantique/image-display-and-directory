@@ -80,11 +80,16 @@ impl MediaItem {
     }
 
     pub fn aspect_ratio(&self) -> f32 {
-        if self.height == 0 {
-            1.0
+        let raw = if self.width == 0 || self.height == 0 {
+            if self.is_video() {
+                16.0 / 9.0
+            } else {
+                1.0
+            }
         } else {
             self.width as f32 / self.height as f32
-        }
+        };
+        raw.clamp(0.05, 20.0)
     }
 
     /// Check if this is a video file based on media type

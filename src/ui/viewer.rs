@@ -18,12 +18,11 @@ use gtk4::{
 use image::GenericImageView;
 use lru::LruCache;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Maximum zoom scale allowed
 const MAX_SCALE: f64 = 10.0;
@@ -35,8 +34,16 @@ const SCROLL_ZOOM_FACTOR: f64 = 0.1;
 const SCROLL_DEADZONE: f64 = 0.02;
 /// Logical scroll units needed to trigger one zoom step.
 const SCROLL_STEP_UNIT: f64 = 0.5;
+/// Reserve space for the top control bar when fitting/centering images.
+const VIEWPORT_TOP_INSET: f64 = 60.0;
 /// Target size for fast preview decode (pixels on longest side)
 const PREVIEW_SIZE: u32 = 512;
+/// Target scale factor for the initial sharp-on-screen decode.
+const VIEWPORT_DECODE_SCALE: f64 = 1.5;
+/// Fallback max size for viewport decode when widget is not allocated yet.
+const VIEWPORT_DECODE_FALLBACK: u32 = 2048;
+/// Idle delay before promoting to full-resolution decode.
+const FULL_DECODE_IDLE_DELAY_MS: u64 = 140;
 const DEFAULT_PREFETCH_MB: usize = 256;
 
 fn video_offload_enabled() -> bool {
@@ -84,6 +91,17 @@ pub struct PrefetchItem {
     pub kind: PrefetchKind,
 }
 
+struct PrefetchWorkItem {
+    item: PrefetchItem,
+    generation: u64,
+}
+
+struct FullDecodeRequest {
+    path: PathBuf,
+    generation: u64,
+    rotation_steps: u8,
+}
+
 /// Result of background image loading - must be Send for cross-thread transfer
 pub(crate) struct LoadResult {
     data: Vec<u8>,
@@ -92,6 +110,7 @@ pub(crate) struct LoadResult {
     orig_width: u32,
     orig_height: u32,
     is_preview: bool,
+    cache_kind: PrefetchKind,
 }
 
 pub(super) struct PrefetchResult {
@@ -113,10 +132,27 @@ pub(super) struct CachedTexture {
     kind: PrefetchKind,
 }
 
+type ToggleFavoriteCallback = Rc<dyn Fn()>;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ViewerCacheKey {
+    path: PathBuf,
+    rotation_steps: u8,
+}
+
+impl ViewerCacheKey {
+    fn new(path: &Path, rotation_steps: u8) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            rotation_steps: rotation_steps % 4,
+        }
+    }
+}
+
 pub(super) struct TextureCache {
     max_bytes: usize,
     bytes: usize,
-    entries: LruCache<PathBuf, CachedTexture>,
+    entries: LruCache<ViewerCacheKey, CachedTexture>,
 }
 
 impl TextureCache {
@@ -129,18 +165,20 @@ impl TextureCache {
         }
     }
 
-    fn get(&mut self, path: &Path) -> Option<CachedTexture> {
-        self.entries.get(path).cloned()
+    fn get(&mut self, path: &Path, rotation_steps: u8) -> Option<CachedTexture> {
+        let key = ViewerCacheKey::new(path, rotation_steps);
+        self.entries.get(&key).cloned()
     }
 
-    fn insert(&mut self, path: PathBuf, entry: CachedTexture) {
-        if let Some(existing) = self.entries.peek(&path) {
+    fn insert(&mut self, path: PathBuf, rotation_steps: u8, entry: CachedTexture) {
+        let key = ViewerCacheKey::new(&path, rotation_steps);
+        if let Some(existing) = self.entries.peek(&key) {
             if existing.kind == PrefetchKind::Full && entry.kind == PrefetchKind::Preview {
                 return;
             }
         }
 
-        if let Some(existing) = self.entries.put(path, entry.clone()) {
+        if let Some(existing) = self.entries.put(key, entry.clone()) {
             self.bytes = self.bytes.saturating_sub(existing.bytes);
         }
         self.bytes = self.bytes.saturating_add(entry.bytes);
@@ -154,8 +192,9 @@ impl TextureCache {
         }
     }
 
-    fn contains(&mut self, path: &Path) -> bool {
-        self.entries.get(path).is_some()
+    fn contains(&mut self, path: &Path, rotation_steps: u8) -> bool {
+        let key = ViewerCacheKey::new(path, rotation_steps);
+        self.entries.get(&key).is_some()
     }
 }
 
@@ -178,6 +217,8 @@ mod imp {
         pub video_timer: RefCell<Option<glib::SourceId>>,
         // Current image path
         pub current_path: RefCell<Option<PathBuf>>,
+        // Additional viewer rotation in 90-degree clockwise steps.
+        pub manual_rotation_cw: Cell<u8>,
         // Whether current content is video
         pub is_video: Cell<bool>,
         // Current zoom scale
@@ -197,6 +238,9 @@ mod imp {
         pub video_play_btn: RefCell<Option<Button>>,
         pub video_seek_scale: RefCell<Option<Scale>>,
         pub video_seek_syncing: Cell<bool>,
+        pub favorite_btn: RefCell<Option<Button>>,
+        pub favorite_indicator: RefCell<Option<Label>>,
+        pub is_favorite: Cell<bool>,
         // Info label
         pub info_label: RefCell<Option<Label>>,
         // Zoom label
@@ -209,14 +253,17 @@ mod imp {
         pub on_close: RefCell<Option<Rc<dyn Fn()>>>,
         // Context menu callback
         pub on_context_menu: RefCell<Option<Rc<dyn Fn(PathBuf, Widget, Rectangle)>>>,
+        pub on_toggle_favorite: RefCell<Option<ToggleFavoriteCallback>>,
         // Loading generation counter (to ignore stale results)
         pub load_generation: Cell<u64>,
         pub load_generation_atomic: Arc<AtomicU64>,
         // Channel sender for image load results (wrapped in Rc for sharing)
         pub(crate) load_sender: RefCell<Option<async_channel::Sender<(u64, LoadResult)>>>,
         pub(super) prefetch_sender: RefCell<Option<async_channel::Sender<PrefetchResult>>>,
-        pub(super) prefetch_request_tx: RefCell<Option<flume::Sender<PrefetchItem>>>,
-        pub(super) prefetch_pending: Arc<Mutex<HashSet<PathBuf>>>,
+        pub(super) prefetch_request_tx: RefCell<Option<flume::Sender<PrefetchWorkItem>>>,
+        pub(super) prefetch_generation: Arc<AtomicU64>,
+        pub(super) full_decode_request_tx: RefCell<Option<flume::Sender<FullDecodeRequest>>>,
+        pub(super) full_decode_idle_timer: RefCell<Option<glib::SourceId>>,
         pub(super) preview_cache: RefCell<TextureCache>,
         // Track pointer position for zoom-at-cursor
         pub pointer_x: Cell<f64>,
@@ -226,6 +273,8 @@ mod imp {
         pub drag_start_pan_y: Cell<f64>,
         // Fractional scroll accumulator for stable wheel/touchpad zoom stepping.
         pub scroll_accum: Cell<f64>,
+        // Scale at pinch gesture start; GestureZoom scale is relative to this baseline.
+        pub pinch_start_scale: Cell<f64>,
         // Last transform to avoid redundant GTK relayout work during drag/zoom.
         pub last_req_w: Cell<i32>,
         pub last_req_h: Cell<i32>,
@@ -244,6 +293,7 @@ mod imp {
                 video_stream: RefCell::new(None),
                 video_timer: RefCell::new(None),
                 current_path: RefCell::new(None),
+                manual_rotation_cw: Cell::new(0),
                 is_video: Cell::new(false),
                 scale: Cell::new(1.0),
                 pan_x: Cell::new(0.0),
@@ -257,24 +307,31 @@ mod imp {
                 video_play_btn: RefCell::new(None),
                 video_seek_scale: RefCell::new(None),
                 video_seek_syncing: Cell::new(false),
+                favorite_btn: RefCell::new(None),
+                favorite_indicator: RefCell::new(None),
+                is_favorite: Cell::new(false),
                 info_label: RefCell::new(None),
                 zoom_label: RefCell::new(None),
                 is_loading: Cell::new(false),
                 user_interacted: Cell::new(false),
                 on_close: RefCell::new(None),
                 on_context_menu: RefCell::new(None),
+                on_toggle_favorite: RefCell::new(None),
                 load_generation: Cell::new(0),
                 load_generation_atomic: Arc::new(AtomicU64::new(0)),
                 load_sender: RefCell::new(None),
                 prefetch_sender: RefCell::new(None),
                 prefetch_request_tx: RefCell::new(None),
-                prefetch_pending: Arc::new(Mutex::new(HashSet::new())),
+                prefetch_generation: Arc::new(AtomicU64::new(0)),
+                full_decode_request_tx: RefCell::new(None),
+                full_decode_idle_timer: RefCell::new(None),
                 preview_cache: RefCell::new(TextureCache::new(prefetch_cache_bytes())),
                 pointer_x: Cell::new(0.0),
                 pointer_y: Cell::new(0.0),
                 drag_start_pan_x: Cell::new(0.0),
                 drag_start_pan_y: Cell::new(0.0),
                 scroll_accum: Cell::new(0.0),
+                pinch_start_scale: Cell::new(1.0),
                 last_req_w: Cell::new(-1),
                 last_req_h: Cell::new(-1),
                 last_pos_x: Cell::new(f64::NAN),
@@ -342,22 +399,32 @@ impl MediaViewer {
         });
 
         // Bounded worker queue for prefetch decode to avoid spawning threads per selection change.
-        let (prefetch_req_tx, prefetch_req_rx) = flume::bounded::<PrefetchItem>(256);
+        let (prefetch_req_tx, prefetch_req_rx) = flume::bounded::<PrefetchWorkItem>(256);
         *imp.prefetch_request_tx.borrow_mut() = Some(prefetch_req_tx);
 
         for _ in 0..2 {
             let rx = prefetch_req_rx.clone();
             let sender = prefetch_sender.clone();
-            let pending = imp.prefetch_pending.clone();
+            let generation = imp.prefetch_generation.clone();
             std::thread::spawn(move || {
-                while let Ok(item) = rx.recv() {
+                while let Ok(work) = rx.recv() {
+                    if work.generation != generation.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let item = work.item;
                     let decoded = match item.kind {
-                        PrefetchKind::Preview => decode_image_downscaled(&item.path, PREVIEW_SIZE)
-                            .map(|(data, w, h, ow, oh)| (data, w, h, ow, oh)),
+                        PrefetchKind::Preview => {
+                            decode_image_downscaled(&item.path, PREVIEW_SIZE, 0)
+                                .map(|(data, w, h, ow, oh)| (data, w, h, ow, oh))
+                        }
                         PrefetchKind::Full => {
-                            decode_image_full(&item.path).map(|(data, w, h)| (data, w, h, w, h))
+                            decode_image_full(&item.path, 0).map(|(data, w, h)| (data, w, h, w, h))
                         }
                     };
+
+                    if work.generation != generation.load(Ordering::Acquire) {
+                        continue;
+                    }
 
                     if let Some((data, width, height, orig_width, orig_height)) = decoded {
                         let _ = sender.send_blocking(PrefetchResult {
@@ -370,9 +437,42 @@ impl MediaViewer {
                             kind: item.kind,
                         });
                     }
+                }
+            });
+        }
 
-                    if let Ok(mut in_flight) = pending.lock() {
-                        in_flight.remove(&item.path);
+        // Single full-resolution worker with latest-only coalescing.
+        let (full_req_tx, full_req_rx) = flume::unbounded::<FullDecodeRequest>();
+        *imp.full_decode_request_tx.borrow_mut() = Some(full_req_tx);
+        let load_generation_guard = imp.load_generation_atomic.clone();
+        let load_sender = imp.load_sender.borrow().as_ref().cloned();
+        if let Some(load_sender) = load_sender {
+            std::thread::spawn(move || {
+                while let Ok(mut req) = full_req_rx.recv() {
+                    while let Ok(next) = full_req_rx.try_recv() {
+                        req = next;
+                    }
+
+                    if req.generation != load_generation_guard.load(Ordering::Acquire) {
+                        continue;
+                    }
+
+                    if let Some((data, width, height)) =
+                        decode_image_full(&req.path, req.rotation_steps)
+                    {
+                        if req.generation != load_generation_guard.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        let result = LoadResult {
+                            data,
+                            width,
+                            height,
+                            orig_width: width,
+                            orig_height: height,
+                            is_preview: false,
+                            cache_kind: PrefetchKind::Full,
+                        };
+                        let _ = load_sender.send_blocking((req.generation, result));
                     }
                 }
             });
@@ -402,19 +502,16 @@ impl MediaViewer {
             imp.image_height.set(result.orig_height);
 
             if let Some(path) = imp.current_path.borrow().clone() {
-                let kind = if result.is_preview {
-                    PrefetchKind::Preview
-                } else {
-                    PrefetchKind::Full
-                };
+                let rotation_steps = imp.manual_rotation_cw.get();
                 self.cache_insert(
                     path,
+                    rotation_steps,
                     texture.clone(),
                     result.width,
                     result.height,
                     result.orig_width,
                     result.orig_height,
-                    kind,
+                    result.cache_kind,
                 );
             }
 
@@ -446,6 +543,7 @@ impl MediaViewer {
         {
             self.cache_insert(
                 result.path,
+                0,
                 texture,
                 result.width,
                 result.height,
@@ -512,14 +610,14 @@ impl MediaViewer {
         content_stack.add_named(&video_area, Some("video"));
         content_stack.set_visible_child_name("image");
 
-        // Create controls bar at bottom
+        // Create controls bar at top
         let controls = GtkBox::new(Orientation::Horizontal, 8);
         controls.set_halign(Align::Fill);
-        controls.set_valign(Align::End);
+        controls.set_valign(Align::Start);
         controls.add_css_class("viewer-controls");
         controls.set_margin_start(8);
         controls.set_margin_end(8);
-        controls.set_margin_bottom(8);
+        controls.set_margin_top(8);
 
         // Close button
         let close_btn = Button::with_label("[X] CLOSE");
@@ -545,6 +643,10 @@ impl MediaViewer {
         // 1:1 scale button
         let actual_btn = Button::with_label("[1:1]");
         actual_btn.set_tooltip_text(Some("Actual size"));
+
+        // Favourite toggle button
+        let favorite_btn = Button::with_label("[FAV -]");
+        favorite_btn.set_tooltip_text(Some("Toggle favourite"));
 
         // Video controls
         let seek_back_btn = Button::with_label("[<< 5s]");
@@ -587,13 +689,22 @@ impl MediaViewer {
         controls.append(&close_btn);
         controls.append(&gtk4::Separator::new(Orientation::Vertical));
         controls.append(&image_controls);
+        controls.append(&favorite_btn);
         controls.append(&video_controls);
         controls.append(&gtk4::Separator::new(Orientation::Vertical));
         controls.append(&info_label);
 
+        let favorite_indicator = Label::new(Some("-"));
+        favorite_indicator.set_halign(Align::End);
+        favorite_indicator.set_valign(Align::Start);
+        favorite_indicator.set_margin_top(14);
+        favorite_indicator.set_margin_end(18);
+        favorite_indicator.add_css_class("viewer-favorite-indicator");
+
         // Set up overlay with stack as main child
         overlay.set_child(Some(&content_stack));
         overlay.add_overlay(&controls);
+        overlay.add_overlay(&favorite_indicator);
 
         // Store references
         *imp.overlay.borrow_mut() = Some(overlay.clone());
@@ -606,9 +717,12 @@ impl MediaViewer {
         *imp.video_controls.borrow_mut() = Some(video_controls.clone());
         *imp.video_play_btn.borrow_mut() = Some(play_pause_btn.clone());
         *imp.video_seek_scale.borrow_mut() = Some(seek_scale.clone());
+        *imp.favorite_btn.borrow_mut() = Some(favorite_btn.clone());
+        *imp.favorite_indicator.borrow_mut() = Some(favorite_indicator);
         *imp.info_label.borrow_mut() = Some(info_label.clone());
         *imp.zoom_label.borrow_mut() = Some(zoom_label.clone());
         imp.scale.set(1.0);
+        self.set_favorite_state(false);
 
         // Set up gestures
         self.setup_gestures(&picture, &overlay, &fixed);
@@ -649,6 +763,13 @@ impl MediaViewer {
         actual_btn.connect_clicked(move |_| {
             if let Some(viewer) = viewer_weak.upgrade() {
                 viewer.set_scale(1.0);
+            }
+        });
+
+        let viewer_weak = self.downgrade();
+        favorite_btn.connect_clicked(move |_| {
+            if let Some(viewer) = viewer_weak.upgrade() {
+                viewer.emit_toggle_favorite();
             }
         });
 
@@ -724,12 +845,20 @@ impl MediaViewer {
         // Zoom gesture (pinch) on overlay
         let zoom_gesture = GestureZoom::new();
         let viewer_weak = self.downgrade();
+        zoom_gesture.connect_begin(move |_, _sequence| {
+            if let Some(viewer) = viewer_weak.upgrade() {
+                let imp = viewer.imp();
+                imp.pinch_start_scale.set(imp.scale.get());
+            }
+        });
+        let viewer_weak = self.downgrade();
         zoom_gesture.connect_scale_changed(move |_gesture, scale| {
             if let Some(viewer) = viewer_weak.upgrade() {
-                if viewer.imp().is_video.get() {
+                let imp = viewer.imp();
+                if imp.is_video.get() {
                     return;
                 }
-                let base_scale = viewer.imp().scale.get();
+                let base_scale = imp.pinch_start_scale.get();
                 let new_scale = (base_scale * scale).clamp(MIN_SCALE, MAX_SCALE);
                 viewer.set_scale(new_scale);
             }
@@ -802,7 +931,7 @@ impl MediaViewer {
 
                 // Ignore no-op scroll deltas (some touchpads emit zero on axis-change frames).
                 if dy.abs() < SCROLL_DEADZONE {
-                    return glib::Propagation::Proceed;
+                    return glib::Propagation::Stop;
                 }
 
                 // Prefer the pointer position from this exact scroll event to avoid stale cursor data.
@@ -827,7 +956,7 @@ impl MediaViewer {
                 imp.scroll_accum.set(accum);
 
                 if steps == 0 {
-                    return glib::Propagation::Proceed;
+                    return glib::Propagation::Stop;
                 }
 
                 let step_factor = 1.0 + SCROLL_ZOOM_FACTOR;
@@ -898,6 +1027,22 @@ impl MediaViewer {
                     Key::Down | Key::j => {
                         viewer.pan_by(0.0, 50.0);
                         glib::Propagation::Stop
+                    }
+                    Key::bracketleft => {
+                        if !viewer.imp().is_video.get() {
+                            viewer.rotate_current_relative(-1);
+                            glib::Propagation::Stop
+                        } else {
+                            glib::Propagation::Proceed
+                        }
+                    }
+                    Key::bracketright => {
+                        if !viewer.imp().is_video.get() {
+                            viewer.rotate_current_relative(1);
+                            glib::Propagation::Stop
+                        } else {
+                            glib::Propagation::Proceed
+                        }
                     }
                     _ => glib::Propagation::Proceed,
                 }
@@ -1088,17 +1233,20 @@ impl MediaViewer {
 
     fn log_video_debug(&self, context: &str) {
         let imp = self.imp();
-        let (overlay_w, overlay_h, overlay_scale) = if let Some(overlay) = imp.overlay.borrow().as_ref() {
-            (overlay.width(), overlay.height(), overlay.scale_factor())
-        } else {
-            (0, 0, 0)
-        };
-        let (stack_w, stack_h, stack_scale) = if let Some(stack) = imp.content_stack.borrow().as_ref() {
-            (stack.width(), stack.height(), stack.scale_factor())
-        } else {
-            (0, 0, 0)
-        };
-        let (video_w, video_h, video_scale) = if let Some(video) = imp.video_area.borrow().as_ref() {
+        let (overlay_w, overlay_h, overlay_scale) =
+            if let Some(overlay) = imp.overlay.borrow().as_ref() {
+                (overlay.width(), overlay.height(), overlay.scale_factor())
+            } else {
+                (0, 0, 0)
+            };
+        let (stack_w, stack_h, stack_scale) =
+            if let Some(stack) = imp.content_stack.borrow().as_ref() {
+                (stack.width(), stack.height(), stack.scale_factor())
+            } else {
+                (0, 0, 0)
+            };
+        let (video_w, video_h, video_scale) = if let Some(video) = imp.video_area.borrow().as_ref()
+        {
             (video.width(), video.height(), video.scale_factor())
         } else {
             (0, 0, 0)
@@ -1218,9 +1366,27 @@ impl MediaViewer {
         }
     }
 
+    pub fn rotate_current_relative(&self, delta_quarters: i8) {
+        let imp = self.imp();
+        if imp.is_video.get() {
+            return;
+        }
+        let Some(path) = imp.current_path.borrow().clone() else {
+            return;
+        };
+        let next = ((imp.manual_rotation_cw.get() as i8 + delta_quarters).rem_euclid(4)) as u8;
+        imp.manual_rotation_cw.set(next);
+        self.show(&path, None);
+    }
+
     /// Show the viewer with an image or video
     pub fn show(&self, image_path: &Path, thumbnail_path: Option<&Path>) {
         let imp = self.imp();
+        let is_new_path = imp.current_path.borrow().as_deref() != Some(image_path);
+        if is_new_path {
+            imp.manual_rotation_cw.set(0);
+        }
+        let manual_rotation = imp.manual_rotation_cw.get();
 
         // Increment generation to invalidate any pending loads
         let generation = imp.load_generation.get().wrapping_add(1);
@@ -1228,6 +1394,7 @@ impl MediaViewer {
         imp.load_generation_atomic
             .store(generation, Ordering::SeqCst);
         let generation_guard = imp.load_generation_atomic.clone();
+        self.cancel_full_decode_timer();
 
         // Reset state
         imp.scale.set(1.0);
@@ -1313,7 +1480,8 @@ impl MediaViewer {
         self.set_video_mode(false);
         self.schedule_layout_retry(generation);
 
-        if let Some(cached) = self.cache_get(image_path) {
+        let mut initial_preview_shown = false;
+        if let Some(cached) = self.cache_get(image_path, manual_rotation) {
             self.set_texture(Some(&cached.texture));
             imp.image_width.set(cached.orig_width);
             imp.image_height.set(cached.orig_height);
@@ -1328,12 +1496,16 @@ impl MediaViewer {
                 self.fit_to_window();
                 return;
             }
+            initial_preview_shown = true;
         }
 
         // Step 1: Show thumbnail immediately if available (fast preview)
-        if let Some(thumb_path) = thumbnail_path {
-            if let Some(texture) = self.load_texture_sync(thumb_path) {
-                self.set_texture(Some(&texture));
+        if !initial_preview_shown {
+            if let Some(thumb_path) = thumbnail_path {
+                if let Some(texture) = self.load_texture_sync(thumb_path) {
+                    self.set_texture(Some(&texture));
+                    initial_preview_shown = true;
+                }
             }
         }
 
@@ -1344,19 +1516,44 @@ impl MediaViewer {
         };
 
         let image_path_owned = image_path.to_path_buf();
+        let viewport_target = self.viewport_decode_target();
 
-        // Step 2: Load downscaled preview quickly in background thread
-        let sender_preview = sender.clone();
-        let image_path_preview = image_path_owned.clone();
-        let gen_preview = generation;
-        let generation_guard_preview = generation_guard.clone();
+        // Decode preview (optional), then decode a viewport-sized sharp image.
+        let sender_seq = sender;
+        let image_path_seq = image_path_owned;
+        let gen_seq = generation;
+        let generation_guard_seq = generation_guard;
+        let rotation_seq = manual_rotation;
+        let decode_preview_first = !initial_preview_shown;
 
         std::thread::spawn(move || {
-            if gen_preview != generation_guard_preview.load(Ordering::SeqCst) {
+            if gen_seq != generation_guard_seq.load(Ordering::SeqCst) {
                 return;
             }
+
+            if decode_preview_first {
+                if let Some((data, width, height, orig_w, orig_h)) =
+                    decode_image_downscaled(&image_path_seq, PREVIEW_SIZE, rotation_seq)
+                {
+                    let result = LoadResult {
+                        data,
+                        width,
+                        height,
+                        orig_width: orig_w,
+                        orig_height: orig_h,
+                        is_preview: true,
+                        cache_kind: PrefetchKind::Preview,
+                    };
+                    let _ = sender_seq.send_blocking((gen_seq, result));
+                }
+            }
+
+            if gen_seq != generation_guard_seq.load(Ordering::SeqCst) {
+                return;
+            }
+
             if let Some((data, width, height, orig_w, orig_h)) =
-                decode_image_downscaled(&image_path_preview, PREVIEW_SIZE)
+                decode_image_viewport(&image_path_seq, viewport_target, rotation_seq)
             {
                 let result = LoadResult {
                     data,
@@ -1364,34 +1561,14 @@ impl MediaViewer {
                     height,
                     orig_width: orig_w,
                     orig_height: orig_h,
-                    is_preview: true,
-                };
-                let _ = sender_preview.send_blocking((gen_preview, result));
-            }
-        });
-
-        // Step 3: Load full resolution in background thread
-        let sender_full = sender;
-        let image_path_full = image_path_owned;
-        let gen_full = generation;
-        let generation_guard_full = generation_guard;
-
-        std::thread::spawn(move || {
-            if gen_full != generation_guard_full.load(Ordering::SeqCst) {
-                return;
-            }
-            if let Some((data, width, height)) = decode_image_full(&image_path_full) {
-                let result = LoadResult {
-                    data,
-                    width,
-                    height,
-                    orig_width: width,
-                    orig_height: height,
                     is_preview: false,
+                    cache_kind: PrefetchKind::Preview,
                 };
-                let _ = sender_full.send_blocking((gen_full, result));
+                let _ = sender_seq.send_blocking((gen_seq, result));
             }
         });
+
+        self.schedule_full_decode(generation, FULL_DECODE_IDLE_DELAY_MS);
     }
 
     fn schedule_layout_retry(&self, generation: u64) {
@@ -1435,6 +1612,73 @@ impl MediaViewer {
         });
     }
 
+    fn cancel_full_decode_timer(&self) {
+        if let Some(source_id) = self.imp().full_decode_idle_timer.borrow_mut().take() {
+            source_id.remove();
+        }
+    }
+
+    fn enqueue_full_decode_for_generation(&self, generation: u64) {
+        let imp = self.imp();
+        if generation != imp.load_generation.get() || !imp.visible.get() || imp.is_video.get() {
+            return;
+        }
+
+        let Some(path) = imp.current_path.borrow().clone() else {
+            return;
+        };
+        let rotation_steps = imp.manual_rotation_cw.get();
+
+        if let Some(cached) = self.cache_get(&path, rotation_steps) {
+            if cached.kind == PrefetchKind::Full {
+                return;
+            }
+        }
+
+        let tx = match imp.full_decode_request_tx.borrow().as_ref() {
+            Some(tx) => tx.clone(),
+            None => return,
+        };
+        let _ = tx.send(FullDecodeRequest {
+            path,
+            generation,
+            rotation_steps,
+        });
+    }
+
+    fn schedule_full_decode(&self, generation: u64, delay_ms: u64) {
+        self.cancel_full_decode_timer();
+        if delay_ms == 0 {
+            self.enqueue_full_decode_for_generation(generation);
+            return;
+        }
+
+        let viewer_weak = self.downgrade();
+        let source_id = glib::timeout_add_local(
+            std::time::Duration::from_millis(delay_ms),
+            move || {
+                if let Some(viewer) = viewer_weak.upgrade() {
+                    viewer.imp().full_decode_idle_timer.borrow_mut().take();
+                    viewer.enqueue_full_decode_for_generation(generation);
+                }
+                glib::ControlFlow::Break
+            },
+        );
+        *self.imp().full_decode_idle_timer.borrow_mut() = Some(source_id);
+    }
+
+    fn viewport_decode_target(&self) -> u32 {
+        let (viewport_w, viewport_h) = self
+            .viewport_rect()
+            .map(|(_, _, w, h)| (w.max(1.0), h.max(1.0)))
+            .unwrap_or((
+                VIEWPORT_DECODE_FALLBACK as f64,
+                VIEWPORT_DECODE_FALLBACK as f64,
+            ));
+        let longest = viewport_w.max(viewport_h) * VIEWPORT_DECODE_SCALE;
+        longest.round().clamp(1024.0, 4096.0) as u32
+    }
+
     pub fn prefetch(&self, mut items: Vec<PrefetchItem>) {
         let imp = self.imp();
         if items.is_empty() {
@@ -1444,7 +1688,7 @@ impl MediaViewer {
         // Filter out items already in cache.
         {
             let mut cache = imp.preview_cache.borrow_mut();
-            items.retain(|item| !is_video_path(&item.path) && !cache.contains(&item.path));
+            items.retain(|item| !is_video_path(&item.path) && !cache.contains(&item.path, 0));
         }
 
         if items.is_empty() {
@@ -1455,21 +1699,17 @@ impl MediaViewer {
             Some(s) => s.clone(),
             None => return,
         };
+        let generation = imp
+            .prefetch_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
 
         for item in items {
-            let should_queue = if let Ok(mut in_flight) = imp.prefetch_pending.lock() {
-                in_flight.insert(item.path.clone())
-            } else {
-                true
-            };
-            if !should_queue {
-                continue;
-            }
-
-            if tx.try_send(item.clone()).is_err() {
-                if let Ok(mut in_flight) = imp.prefetch_pending.lock() {
-                    in_flight.remove(&item.path);
-                }
+            if tx
+                .try_send(PrefetchWorkItem { item, generation })
+                .is_err()
+            {
+                break;
             }
         }
     }
@@ -1525,13 +1765,40 @@ impl MediaViewer {
         }
     }
 
-    fn cache_get(&self, path: &Path) -> Option<CachedTexture> {
-        self.imp().preview_cache.borrow_mut().get(path)
+    pub fn prime_preview_texture(
+        &self,
+        path: &Path,
+        texture: &Texture,
+        orig_width: u32,
+        orig_height: u32,
+    ) {
+        let width = texture.width().max(1) as u32;
+        let height = texture.height().max(1) as u32;
+        let orig_width = orig_width.max(1);
+        let orig_height = orig_height.max(1);
+        self.cache_insert(
+            path.to_path_buf(),
+            0,
+            texture.clone(),
+            width,
+            height,
+            orig_width,
+            orig_height,
+            PrefetchKind::Preview,
+        );
+    }
+
+    fn cache_get(&self, path: &Path, rotation_steps: u8) -> Option<CachedTexture> {
+        self.imp()
+            .preview_cache
+            .borrow_mut()
+            .get(path, rotation_steps)
     }
 
     fn cache_insert(
         &self,
         path: PathBuf,
+        rotation_steps: u8,
         texture: Texture,
         width: u32,
         height: u32,
@@ -1549,7 +1816,10 @@ impl MediaViewer {
             bytes,
             kind,
         };
-        self.imp().preview_cache.borrow_mut().insert(path, entry);
+        self.imp()
+            .preview_cache
+            .borrow_mut()
+            .insert(path, rotation_steps, entry);
     }
 
     /// Update the info label
@@ -1570,11 +1840,18 @@ impl MediaViewer {
 
             let loading = if is_preview { " (preview)" } else { "" };
             let scale = imp.scale.get();
+            let rotation = imp.manual_rotation_cw.get();
+            let rotation_text = if rotation == 0 {
+                String::new()
+            } else {
+                format!(" [rot:{}]", rotation as u32 * 90)
+            };
 
             label.set_text(&format!(
-                "> {}{} @ {}%{}",
+                "> {}{}{} @ {}%{}",
                 filename,
                 dims,
+                rotation_text,
                 (scale * 100.0) as i32,
                 loading
             ));
@@ -1590,6 +1867,7 @@ impl MediaViewer {
     /// Hide the viewer
     pub fn hide(&self) {
         let imp = self.imp();
+        self.cancel_full_decode_timer();
 
         // Increment generation to invalidate pending loads
         let generation = imp.load_generation.get().wrapping_add(1);
@@ -1600,8 +1878,10 @@ impl MediaViewer {
         imp.visible.set(false);
         imp.is_loading.set(false);
         imp.is_video.set(false);
+        imp.manual_rotation_cw.set(0);
         imp.scroll_accum.set(0.0);
         self.set_preview_loading(false);
+        self.set_favorite_state(false);
         self.set_video_mode(false);
         self.stop_video_info_timer();
 
@@ -1648,6 +1928,36 @@ impl MediaViewer {
         *self.imp().on_context_menu.borrow_mut() = Some(Rc::new(callback));
     }
 
+    pub fn connect_toggle_favorite<F>(&self, callback: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.imp().on_toggle_favorite.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    pub fn set_favorite_state(&self, is_favorite: bool) {
+        let imp = self.imp();
+        imp.is_favorite.set(is_favorite);
+
+        if let Some(button) = imp.favorite_btn.borrow().as_ref() {
+            button.set_label(if is_favorite { "[FAV +]" } else { "[FAV -]" });
+            if is_favorite {
+                button.add_css_class("favorite-on");
+            } else {
+                button.remove_css_class("favorite-on");
+            }
+        }
+
+        if let Some(indicator) = imp.favorite_indicator.borrow().as_ref() {
+            indicator.set_text(if is_favorite { "+" } else { "-" });
+            if is_favorite {
+                indicator.add_css_class("favorite-on");
+            } else {
+                indicator.remove_css_class("favorite-on");
+            }
+        }
+    }
+
     /// Get the current path being displayed
     pub fn current_path(&self) -> Option<PathBuf> {
         self.imp().current_path.borrow().clone()
@@ -1660,6 +1970,12 @@ impl MediaViewer {
         };
         if let Some(ref callback) = *imp.on_context_menu.borrow() {
             callback(path, anchor.clone(), rect);
+        }
+    }
+
+    fn emit_toggle_favorite(&self) {
+        if let Some(ref callback) = *self.imp().on_toggle_favorite.borrow() {
+            callback();
         }
     }
 
@@ -1683,10 +1999,8 @@ impl MediaViewer {
             return;
         }
 
-        // Get fixed container dimensions (same as overlay since it expands)
-        let (container_w, container_h) = if let Some(fixed) = imp.fixed.borrow().as_ref() {
-            (fixed.width() as f64, fixed.height() as f64)
-        } else {
+        let Some((container_x, container_y, container_w, container_h)) = self.viewport_rect()
+        else {
             return;
         };
 
@@ -1706,20 +2020,26 @@ impl MediaViewer {
         // Calculate current picture position in container
         let old_scaled_w = img_w * old_scale;
         let old_scaled_h = img_h * old_scale;
-        let old_pic_x = (container_w - old_scaled_w) / 2.0 + old_pan_x;
-        let old_pic_y = (container_h - old_scaled_h) / 2.0 + old_pan_y;
+        let old_pic_x = container_x + (container_w - old_scaled_w) / 2.0 + old_pan_x;
+        let old_pic_y = container_y + (container_h - old_scaled_h) / 2.0 + old_pan_y;
 
         // True zoom-to-cursor behavior: keep the anchor point stable.
-        let center_x = container_w * 0.5;
-        let center_y = container_h * 0.5;
         let inside_image = pointer_x >= old_pic_x
             && pointer_x <= old_pic_x + old_scaled_w
             && pointer_y >= old_pic_y
             && pointer_y <= old_pic_y + old_scaled_h;
 
-        // If cursor is on blank space, anchor from center to avoid edge snapping.
-        let anchor_x = if inside_image { pointer_x } else { center_x };
-        let anchor_y = if inside_image { pointer_y } else { center_y };
+        // Clamp to image edge outside bounds to avoid abrupt cursor->center anchor jumps.
+        let anchor_x = if inside_image {
+            pointer_x
+        } else {
+            pointer_x.clamp(old_pic_x, old_pic_x + old_scaled_w)
+        };
+        let anchor_y = if inside_image {
+            pointer_y
+        } else {
+            pointer_y.clamp(old_pic_y, old_pic_y + old_scaled_h)
+        };
 
         // Image-space anchor; do not clamp so blank-space zoom stays geometrically stable.
         let img_x = (anchor_x - old_pic_x) / old_scale;
@@ -1735,8 +2055,8 @@ impl MediaViewer {
         let new_pic_y = target_y - img_y * new_scale;
 
         // Convert back to pan (pic_pos = base + pan, so pan = pic_pos - base)
-        let new_base_x = (container_w - new_scaled_w) / 2.0;
-        let new_base_y = (container_h - new_scaled_h) / 2.0;
+        let new_base_x = container_x + (container_w - new_scaled_w) / 2.0;
+        let new_base_y = container_y + (container_h - new_scaled_h) / 2.0;
         let new_pan_x = new_pic_x - new_base_x;
         let new_pan_y = new_pic_y - new_base_y;
 
@@ -1759,19 +2079,13 @@ impl MediaViewer {
             return;
         }
 
-        // Get window dimensions from overlay
-        if let Some(overlay) = imp.overlay.borrow().as_ref() {
-            let window_w = overlay.width() as f64;
-            let window_h = overlay.height() as f64;
+        if let Some((_, _, viewport_w, viewport_h)) = self.viewport_rect() {
             let img_w = imp.image_width.get() as f64;
             let img_h = imp.image_height.get() as f64;
 
-            if img_w > 0.0 && img_h > 0.0 && window_w > 0.0 && window_h > 0.0 {
-                // Account for controls bar height (~50px)
-                let available_h = window_h - 60.0;
-
-                let scale_w = window_w / img_w;
-                let scale_h = available_h / img_h;
+            if img_w > 0.0 && img_h > 0.0 && viewport_w > 0.0 && viewport_h > 0.0 {
+                let scale_w = viewport_w / img_w;
+                let scale_h = viewport_h / img_h;
                 let scale = scale_w.min(scale_h).min(1.0); // Don't upscale beyond 1:1
 
                 imp.pan_x.set(0.0);
@@ -1805,8 +2119,10 @@ impl MediaViewer {
         let picture = imp.picture.borrow();
 
         if let (Some(fixed), Some(picture)) = (fixed.as_ref(), picture.as_ref()) {
-            let container_w = fixed.width() as f64;
-            let container_h = fixed.height() as f64;
+            let Some((container_x, container_y, container_w, container_h)) = self.viewport_rect()
+            else {
+                return;
+            };
 
             if container_w <= 0.0 || container_h <= 0.0 {
                 return;
@@ -1832,8 +2148,8 @@ impl MediaViewer {
 
             // Calculate position to center the image, then apply pan
             // Base position (centered in container)
-            let base_x = (container_w - scaled_w) / 2.0;
-            let base_y = (container_h - scaled_h) / 2.0;
+            let base_x = container_x + (container_w - scaled_w) / 2.0;
+            let base_y = container_y + (container_h - scaled_h) / 2.0;
 
             // Final position with pan
             let final_x = base_x + pan_x;
@@ -1851,6 +2167,22 @@ impl MediaViewer {
                 imp.last_pos_y.set(final_y);
             }
         }
+    }
+
+    // Returns the image viewport within the fixed container as (x, y, width, height).
+    fn viewport_rect(&self) -> Option<(f64, f64, f64, f64)> {
+        let imp = self.imp();
+        let fixed = imp.fixed.borrow();
+        let fixed = fixed.as_ref()?;
+
+        let full_w = fixed.width() as f64;
+        let full_h = fixed.height() as f64;
+        if full_w <= 0.0 || full_h <= 0.0 {
+            return None;
+        }
+
+        let viewport_h = (full_h - VIEWPORT_TOP_INSET).max(1.0);
+        Some((0.0, VIEWPORT_TOP_INSET, full_w, viewport_h))
     }
 
     /// Reset zoom and pan to default
@@ -1881,6 +2213,9 @@ impl MediaViewer {
                 Some(imp.image_height.get()),
                 imp.is_loading.get(),
             );
+            if clamped > 1.0 {
+                self.schedule_full_decode(imp.load_generation.get(), 0);
+            }
         }
     }
 }
@@ -1906,8 +2241,35 @@ fn format_timestamp(seconds: f64) -> String {
 }
 
 /// Decode an image at downscaled resolution for fast preview
-fn decode_image_downscaled(path: &Path, max_size: u32) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
-    let img = crate::image_loader::open_image(path).ok()?;
+fn decode_image_downscaled(
+    path: &Path,
+    max_size: u32,
+    extra_rotation_cw: u8,
+) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
+    if let Some((img, orig_w, orig_h)) =
+        crate::image_loader::open_embedded_jpeg_preview_with_rotation(path, extra_rotation_cw)
+    {
+        let (preview_w, preview_h) = img.dimensions();
+        let scale = if preview_w > preview_h {
+            max_size as f32 / preview_w as f32
+        } else {
+            max_size as f32 / preview_h as f32
+        };
+        let prepared = if scale < 1.0 {
+            let new_w = ((preview_w as f32 * scale) as u32).max(1);
+            let new_h = ((preview_h as f32 * scale) as u32).max(1);
+            img.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        }
+        .blur(0.9);
+
+        let (out_w, out_h) = prepared.dimensions();
+        let rgba = prepared.to_rgba8();
+        return Some((rgba.into_raw(), out_w.max(1), out_h.max(1), orig_w, orig_h));
+    }
+
+    let img = crate::image_loader::open_image_with_rotation(path, extra_rotation_cw).ok()?;
     let (orig_w, orig_h) = img.dimensions();
 
     // Calculate scale to fit within max_size
@@ -1938,9 +2300,56 @@ fn decode_image_downscaled(path: &Path, max_size: u32) -> Option<(Vec<u8>, u32, 
     Some((rgba.into_raw(), out_w.max(1), out_h.max(1), orig_w, orig_h))
 }
 
+/// Decode a sharper image sized to the current viewport to avoid immediate full-res cost.
+fn decode_image_viewport(
+    path: &Path,
+    max_size: u32,
+    extra_rotation_cw: u8,
+) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
+    if let Some((img, orig_w, orig_h)) =
+        crate::image_loader::open_embedded_jpeg_preview_with_rotation(path, extra_rotation_cw)
+    {
+        let (preview_w, preview_h) = img.dimensions();
+        let scale = if preview_w > preview_h {
+            max_size as f32 / preview_w as f32
+        } else {
+            max_size as f32 / preview_h as f32
+        };
+        let prepared = if scale < 1.0 {
+            let new_w = ((preview_w as f32 * scale) as u32).max(1);
+            let new_h = ((preview_h as f32 * scale) as u32).max(1);
+            img.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+
+        let (out_w, out_h) = prepared.dimensions();
+        let rgba = prepared.to_rgba8();
+        return Some((rgba.into_raw(), out_w.max(1), out_h.max(1), orig_w, orig_h));
+    }
+
+    let img = crate::image_loader::open_image_with_rotation(path, extra_rotation_cw).ok()?;
+    let (orig_w, orig_h) = img.dimensions();
+    let scale = if orig_w > orig_h {
+        max_size as f32 / orig_w as f32
+    } else {
+        max_size as f32 / orig_h as f32
+    };
+    let prepared = if scale < 1.0 {
+        let new_w = ((orig_w as f32 * scale) as u32).max(1);
+        let new_h = ((orig_h as f32 * scale) as u32).max(1);
+        img.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let (out_w, out_h) = prepared.dimensions();
+    let rgba = prepared.to_rgba8();
+    Some((rgba.into_raw(), out_w.max(1), out_h.max(1), orig_w, orig_h))
+}
+
 /// Decode an image at full resolution
-fn decode_image_full(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let img = crate::image_loader::open_image(path).ok()?;
+fn decode_image_full(path: &Path, extra_rotation_cw: u8) -> Option<(Vec<u8>, u32, u32)> {
+    let img = crate::image_loader::open_image_with_rotation(path, extra_rotation_cw).ok()?;
     let (width, height) = img.dimensions();
     let rgba = img.to_rgba8();
 

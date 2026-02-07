@@ -422,6 +422,19 @@ impl MediaStore {
         Ok(false)
     }
 
+    /// Returns favorite paths ordered by newest first.
+    pub fn list_favorite_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path FROM favorites ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(PathBuf::from(row?));
+        }
+        Ok(paths)
+    }
+
     /// Returns all albums (id, name) ordered by name.
     pub fn list_albums(&self) -> Result<Vec<(i64, String)>> {
         let mut stmt = self
@@ -459,6 +472,38 @@ impl MediaStore {
             params![album_id, path_str.as_ref(), now],
         )?;
         Ok(inserted > 0)
+    }
+
+    /// Returns album ids containing the given path.
+    pub fn album_ids_for_path(&self, path: &Path) -> Result<Vec<i64>> {
+        let path_str = path.to_string_lossy();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT album_id FROM album_items WHERE path = ?1")?;
+        let rows = stmt.query_map(params![path_str.as_ref()], |row| row.get::<_, i64>(0))?;
+        let mut album_ids = Vec::new();
+        for row in rows {
+            album_ids.push(row?);
+        }
+        Ok(album_ids)
+    }
+
+    /// Returns paths in an album ordered by newest first.
+    pub fn list_album_paths(&self, album_id: i64) -> Result<Vec<PathBuf>> {
+        let mut stmt = self.conn.prepare_cached(
+            "
+            SELECT path
+            FROM album_items
+            WHERE album_id = ?1
+            ORDER BY created_at DESC
+            ",
+        )?;
+        let rows = stmt.query_map(params![album_id], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(PathBuf::from(row?));
+        }
+        Ok(paths)
     }
 
     /// Retrieves all media items from the database.

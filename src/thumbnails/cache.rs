@@ -30,6 +30,8 @@ const MAX_MEMORY_MB: usize = 512;
 
 /// Estimated bytes per pixel for RGBA textures.
 const BYTES_PER_PIXEL: usize = 4;
+/// Bump when thumbnail generation semantics change (e.g., EXIF orientation handling).
+const THUMB_CACHE_VERSION: u8 = 2;
 
 /// Default capacity for the LRU cache (number of entries).
 const DEFAULT_LRU_CAPACITY: usize = 2048;
@@ -84,7 +86,8 @@ impl CacheKey {
     fn compute_hash(path: &Path, mtime: i64, size: i64) -> u64 {
         // Combine path, mtime, and size into a single buffer for hashing
         let path_str = path.to_string_lossy();
-        let mut data = Vec::with_capacity(path_str.len() + 16);
+        let mut data = Vec::with_capacity(path_str.len() + 17);
+        data.push(THUMB_CACHE_VERSION);
         data.extend_from_slice(path_str.as_bytes());
         data.extend_from_slice(&mtime.to_le_bytes());
         data.extend_from_slice(&size.to_le_bytes());

@@ -19,9 +19,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Image processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 
-# Video playback via libmpv
-libmpv2 = "4"
-
 # Epoxy for OpenGL proc address resolution in GTK
 epoxy = "0.1"
 

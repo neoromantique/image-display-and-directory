@@ -12,7 +12,8 @@
     "--socket=wayland",
     "--socket=fallback-x11",
     "--device=dri",
-    "--filesystem=home"
+    "--filesystem=home",
+    "--talk-name=org.freedesktop.Flatpak"
   ],
   "modules": [
     {

@@ -6,12 +6,13 @@ use glib::Object;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{
-    gdk, glib, Align, Box as GtkBox, ContentFit, GestureClick, Label, Orientation, Overlay, Picture,
-    Widget,
+    gdk, glib, Align, Box as GtkBox, ContentFit, GestureClick, Label, Orientation, Overlay,
+    Picture, Widget,
 };
 use image::GenericImageView;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ const ROW_PREVIEW_SIZE: u32 = 512;
 const ROW_LOADER_THREADS: usize = 2;
 const ROW_LOADER_QUEUE: usize = 512;
 const ROW_CACHE_ENTRIES: usize = 1024;
+const VIDEO_PREVIEW_START_SECS: [f64; 2] = [1.0, 0.0];
 
 // Placeholder texture - generated once and reused
 fn placeholder_texture() -> &'static Texture {
@@ -285,6 +287,10 @@ impl RowImageLoader {
         }
     }
 
+    fn cached_texture(&self, path: &Path) -> Option<Texture> {
+        self.state.borrow_mut().cache.get(path).cloned()
+    }
+
     fn reschedule(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         let mut state = self.state.borrow_mut();
@@ -327,11 +333,15 @@ pub fn reschedule_row_previews() {
     ROW_IMAGE_LOADER.with(|loader| loader.reschedule());
 }
 
+pub fn cached_row_preview_texture(path: &Path) -> Option<Texture> {
+    ROW_IMAGE_LOADER.with(|loader| loader.cached_texture(path))
+}
+
 fn decode_row_preview(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let img = match crate::image_loader::open_image(path) {
-        Ok(img) => img,
-        Err(_) if is_video_path(path) => decode_video_preview(path)?,
-        Err(_) => return None,
+    let img = if is_video_path(path) {
+        decode_video_preview(path)?
+    } else {
+        crate::image_loader::open_image(path).ok()?
     };
     let resized = img.thumbnail(ROW_PREVIEW_SIZE, ROW_PREVIEW_SIZE);
     let (width, height) = resized.dimensions();
@@ -352,34 +362,213 @@ fn is_video_path(path: &Path) -> bool {
 }
 
 fn decode_video_preview(path: &Path) -> Option<image::DynamicImage> {
-    // Try a frame slightly into the stream first (many videos start with black).
-    ffmpeg_extract_frame(path, "00:00:01.000")
-        .or_else(|| ffmpeg_extract_frame(path, "00:00:00.000"))
+    VIDEO_PREVIEW_START_SECS
+        .iter()
+        .copied()
+        .find_map(|start_seconds| mpv_extract_frame(path, start_seconds))
 }
 
-fn ffmpeg_extract_frame(path: &Path, timestamp: &str) -> Option<image::DynamicImage> {
-    let output = Command::new("ffmpeg")
-        .arg("-v")
-        .arg("error")
-        .arg("-ss")
-        .arg(timestamp)
-        .arg("-i")
-        .arg(path)
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-f")
-        .arg("image2pipe")
-        .arg("-vcodec")
-        .arg("png")
-        .arg("-")
-        .output()
-        .ok()?;
+struct VideoPreviewDir {
+    path: PathBuf,
+}
 
-    if !output.status.success() || output.stdout.is_empty() {
-        return None;
+impl VideoPreviewDir {
+    fn new() -> Option<Self> {
+        static NEXT_PREVIEW_DIR_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_PREVIEW_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("idxd-mpv-thumb-{}-{}", std::process::id(), id));
+        fs::create_dir_all(&path).ok()?;
+        Some(Self { path })
     }
 
-    image::load_from_memory(&output.stdout).ok()
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for VideoPreviewDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn mpv_extract_frame(path: &Path, start_seconds: f64) -> Option<image::DynamicImage> {
+    let out_dir = VideoPreviewDir::new()?;
+    let out_dir_str = out_dir.path().to_str()?;
+    let start = format!("{start_seconds:.3}");
+
+    run_mpv_command(path, out_dir_str, &start)?;
+    let image_path = find_generated_preview_file(out_dir.path())?;
+    image::open(image_path).ok()
+}
+
+fn find_generated_preview_file(dir: &Path) -> Option<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.is_file())
+        .collect();
+
+    files.sort();
+    files.into_iter().next_back()
+}
+
+fn run_mpv_command(path: &Path, out_dir: &str, start_seconds: &str) -> Option<()> {
+    if run_mpv_command_impl(Command::new("mpv"), path, out_dir, start_seconds, "mpv") {
+        return Some(());
+    }
+
+    // Flatpak fallback: use host mpv if app runtime doesn't provide it.
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        let mut cmd = Command::new("flatpak-spawn");
+        cmd.arg("--host").arg("mpv");
+        if run_mpv_command_impl(
+            cmd,
+            path,
+            out_dir,
+            start_seconds,
+            "flatpak-spawn --host mpv",
+        ) {
+            return Some(());
+        }
+    }
+
+    if run_gst_thumbnail_command(path, out_dir) {
+        return Some(());
+    }
+
+    tracing::debug!(
+        path = %path.display(),
+        "Video thumbnail extraction failed: mpv/gstreamer unavailable or failed"
+    );
+    None
+}
+
+fn run_mpv_command_impl(
+    mut cmd: Command,
+    path: &Path,
+    out_dir: &str,
+    start_seconds: &str,
+    command_label: &str,
+) -> bool {
+    let start_arg = format!("--start={start_seconds}");
+    let outdir_arg = format!("--vo-image-outdir={out_dir}");
+
+    let result = cmd
+        .arg("--no-config")
+        .arg("--no-terminal")
+        .arg("--msg-level=all=error")
+        .arg("--ao=null")
+        .arg("--vo=image")
+        .arg("--vo-image-format=png")
+        .arg(outdir_arg)
+        .arg("--frames=1")
+        .arg(start_arg)
+        .arg("--")
+        .arg(path)
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(
+                command = command_label,
+                path = %path.display(),
+                status = %output.status,
+                stderr = stderr.trim(),
+                "mpv thumbnail command failed"
+            );
+            false
+        }
+        Err(err) => {
+            tracing::debug!(
+                command = command_label,
+                path = %path.display(),
+                error = ?err,
+                "Failed to spawn mpv thumbnail command"
+            );
+            false
+        }
+    }
+}
+
+fn run_gst_thumbnail_command(path: &Path, out_dir: &str) -> bool {
+    let output_path = Path::new(out_dir).join("thumb-gst.png");
+    if run_gst_thumbnail_command_impl(
+        Command::new("gst-launch-1.0"),
+        path,
+        &output_path,
+        "gst-launch-1.0",
+    ) {
+        return true;
+    }
+
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        let mut cmd = Command::new("flatpak-spawn");
+        cmd.arg("--host").arg("gst-launch-1.0");
+        if run_gst_thumbnail_command_impl(
+            cmd,
+            path,
+            &output_path,
+            "flatpak-spawn --host gst-launch-1.0",
+        ) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn run_gst_thumbnail_command_impl(
+    mut cmd: Command,
+    path: &Path,
+    output_path: &Path,
+    command_label: &str,
+) -> bool {
+    let location_arg = format!("location={}", path.to_string_lossy());
+    let output_arg = format!("location={}", output_path.to_string_lossy());
+
+    let result = cmd
+        .arg("-q")
+        .arg("filesrc")
+        .arg(location_arg)
+        .arg("!")
+        .arg("decodebin")
+        .arg("!")
+        .arg("videoconvert")
+        .arg("!")
+        .arg("pngenc")
+        .arg("snapshot=true")
+        .arg("!")
+        .arg("filesink")
+        .arg(output_arg)
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(
+                command = command_label,
+                path = %path.display(),
+                status = %output.status,
+                stderr = stderr.trim(),
+                "gstreamer thumbnail command failed"
+            );
+            false
+        }
+        Err(err) => {
+            tracing::debug!(
+                command = command_label,
+                path = %path.display(),
+                error = ?err,
+                "Failed to spawn gstreamer thumbnail command"
+            );
+            false
+        }
+    }
 }
 
 fn create_texture_from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> Option<Texture> {
@@ -442,7 +631,7 @@ mod imp {
 
             let obj = self.obj();
             obj.set_orientation(Orientation::Horizontal);
-            obj.set_spacing(2);
+            obj.set_spacing(0);
             obj.set_homogeneous(false);
             obj.set_hexpand(true);
             obj.set_halign(Align::Fill);
@@ -470,7 +659,6 @@ impl RowWidget {
     pub fn bind(&self, row_model: &RowModel) {
         let imp = self.imp();
         let items = &row_model.items;
-        let row_height = row_model.height_px as i32;
 
         let mut slots = imp.slots.borrow_mut();
         let mut load_tokens = imp.load_tokens.borrow_mut();
@@ -505,8 +693,8 @@ impl RowWidget {
         // Update item dimensions and content
         for (i, item) in items.iter().enumerate() {
             let slot = &slots[i];
-            let width = item.display_w as i32;
-            let height = row_height;
+            let width = (item.display_w.floor() as i32).max(1);
+            let height = (item.display_h.round() as i32).max(1);
 
             slot.widget.set_size_request(width, height);
             slot.picture.set_size_request(width, height);

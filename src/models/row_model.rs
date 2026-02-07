@@ -5,6 +5,7 @@ pub struct RowItem {
     pub media_path: PathBuf,
     pub display_w: f32,
     pub display_h: f32,
+    pub offset_top: f32,
     pub is_folder: bool,
 }
 

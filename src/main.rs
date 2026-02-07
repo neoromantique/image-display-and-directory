@@ -1,14 +1,12 @@
+#![allow(dead_code)]
+
 mod app;
 mod image_loader;
 mod layout;
 mod models;
-mod ui;
-
-// These modules are complete implementations not yet wired into the main app
-#[cfg(test)]
 mod scanner;
-#[cfg(test)]
 mod thumbnails;
+mod ui;
 
 use app::IdxdApp;
 

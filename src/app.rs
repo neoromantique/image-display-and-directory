@@ -1,9 +1,15 @@
 use gtk4::prelude::*;
 use gtk4::{gio, Application};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::ui::MainWindow;
 
 const APP_ID: &str = "lt.gtw.idxd";
+
+thread_local! {
+    static WINDOWS: RefCell<Vec<Rc<MainWindow>>> = const { RefCell::new(Vec::new()) };
+}
 
 pub struct IdxdApp {
     app: Application,
@@ -16,8 +22,13 @@ impl IdxdApp {
             .flags(gio::ApplicationFlags::HANDLES_OPEN)
             .build();
 
-        app.connect_activate(Self::on_activate);
-        app.connect_open(Self::on_open);
+        app.connect_activate(|app| {
+            Self::open_window(app, None);
+        });
+        app.connect_open(|app, files, _hint| {
+            let path = files.first().and_then(|f| f.path());
+            Self::open_window(app, path.as_deref());
+        });
 
         Self { app }
     }
@@ -26,23 +37,18 @@ impl IdxdApp {
         self.app.run().into()
     }
 
-    fn on_activate(app: &Application) {
-        let window = MainWindow::new(app, None);
+    fn open_window(app: &Application, initial_path: Option<&std::path::Path>) {
+        let window = MainWindow::new(app, initial_path);
+        let window_id = Rc::as_ptr(&window) as usize;
+        window.connect_close_request(move || {
+            WINDOWS.with(|windows| {
+                windows
+                    .borrow_mut()
+                    .retain(|existing| Rc::as_ptr(existing) as usize != window_id);
+            });
+        });
         window.present();
-        // Keep the window alive by storing it on the Application.
-        unsafe {
-            app.set_data("main-window", window);
-        }
-    }
-
-    fn on_open(app: &Application, files: &[gio::File], _hint: &str) {
-        let path = files.first().and_then(|f| f.path());
-        let window = MainWindow::new(app, path.as_deref());
-        window.present();
-        // Keep the window alive by storing it on the Application.
-        unsafe {
-            app.set_data("main-window", window);
-        }
+        WINDOWS.with(|windows| windows.borrow_mut().push(window));
     }
 }
 

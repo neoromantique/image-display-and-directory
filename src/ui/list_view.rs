@@ -76,6 +76,7 @@ pub struct MediaListView {
     visible_range: Rc<RefCell<(u32, u32)>>,
     selection: Rc<RefCell<(u32, u32)>>,
     row_widgets: Rc<RefCell<Vec<glib::WeakRef<RowWidget>>>>,
+    row_offsets: Rc<RefCell<Vec<f64>>>,
     on_item_activated: Rc<RefCell<Option<Box<dyn Fn(u32, u32, PathBuf)>>>>,
     on_item_context_menu:
         Rc<RefCell<Option<Box<dyn Fn(u32, u32, PathBuf, Widget, gdk::Rectangle)>>>>,
@@ -111,9 +112,7 @@ impl MediaListView {
                 .downcast_ref::<ListItem>()
                 .expect("ListItem expected");
             let row_widget = RowWidget::new();
-            row_widgets_setup
-                .borrow_mut()
-                .push(row_widget.downgrade());
+            row_widgets_setup.borrow_mut().push(row_widget.downgrade());
             let on_item_activated = on_item_activated_setup.clone();
             let on_item_context_menu = on_item_context_menu_setup.clone();
             row_widget.connect_item_activated(move |row, col, path| {
@@ -193,6 +192,7 @@ impl MediaListView {
         scrolled_window.set_min_content_height(0);
 
         let visible_range = Rc::new(RefCell::new((0u32, 0u32)));
+        let row_offsets = Rc::new(RefCell::new(Vec::new()));
 
         Self {
             scrolled_window,
@@ -201,6 +201,7 @@ impl MediaListView {
             visible_range,
             selection,
             row_widgets,
+            row_offsets,
             on_item_activated,
             on_item_context_menu,
         }
@@ -252,6 +253,15 @@ impl MediaListView {
 
     /// Replace all rows
     pub fn set_rows(&self, rows: Vec<RowModel>) {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        offsets.push(0.0);
+        let mut y = 0.0;
+        for row in &rows {
+            y += row.height_px as f64;
+            offsets.push(y);
+        }
+        *self.row_offsets.borrow_mut() = offsets;
+
         let objects: Vec<RowModelObject> = rows.into_iter().map(RowModelObject::new).collect();
         self.model.splice(0, self.model.n_items(), &objects);
     }
@@ -276,13 +286,14 @@ impl MediaListView {
 
     /// Scroll to a specific row
     pub fn scroll_to_row(&self, index: u32) {
-        // ListView doesn't have built-in scroll_to, use adjustment
-        // This is a simplified version - real implementation would calculate
-        // the exact position based on row heights
         let vadj = self.scrolled_window.vadjustment();
-        // Estimate position (assuming average row height of 200px)
-        let estimated_pos = index as f64 * 200.0;
-        vadj.set_value(estimated_pos.min(vadj.upper() - vadj.page_size()));
+        let offsets = self.row_offsets.borrow();
+        let position = offsets
+            .get(index as usize)
+            .copied()
+            .unwrap_or_else(|| vadj.value());
+        let max_pos = (vadj.upper() - vadj.page_size()).max(0.0);
+        vadj.set_value(position.min(max_pos));
     }
 
     /// Set up a callback for when visible range changes
@@ -292,23 +303,26 @@ impl MediaListView {
     {
         let visible_range = self.visible_range.clone();
         let model = self.model.clone();
+        let row_offsets = self.row_offsets.clone();
 
         let vadj = self.scrolled_window.vadjustment();
         vadj.connect_value_changed(move |adj| {
             let value = adj.value();
             let page_size = adj.page_size();
-            let upper = adj.upper();
-
-            // Estimate row height (could be made more accurate with actual heights)
-            let avg_row_height = if model.n_items() > 0 && upper > 0.0 {
-                upper / model.n_items() as f64
-            } else {
-                200.0
+            let count = model.n_items();
+            if count == 0 {
+                return;
+            }
+            let offsets = row_offsets.borrow();
+            if offsets.len() < (count as usize + 1) {
+                return;
+            }
+            let find_row = |y: f64| -> u32 {
+                let idx = offsets.partition_point(|off| *off <= y);
+                idx.saturating_sub(1).min(count as usize - 1) as u32
             };
-
-            let first_visible = (value / avg_row_height).floor() as u32;
-            let last_visible = ((value + page_size) / avg_row_height).ceil() as u32;
-            let last_visible = last_visible.min(model.n_items().saturating_sub(1));
+            let first_visible = find_row(value);
+            let last_visible = find_row(value + page_size);
 
             let mut range = visible_range.borrow_mut();
             if *range != (first_visible, last_visible) {

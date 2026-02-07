@@ -71,13 +71,13 @@ listview > row:selected {
 .media-item {
     background-color: @bg_secondary;
     border: none;
-    outline: 1px solid @border_color;
+    outline: none;
     margin: 0;
     padding: 0;
 }
 
 .media-item:hover {
-    outline-color: @border_hover;
+    outline: none;
 }
 
 .media-item:selected,
@@ -342,6 +342,27 @@ tooltip {
     color: @text_secondary;
 }
 
+.viewer-controls button.favorite-on {
+    border-color: #00ff88;
+    color: #00ff88;
+}
+
+.viewer-favorite-indicator {
+    min-width: 22px;
+    padding: 2px 8px;
+    border: 1px solid @border_color;
+    background-color: alpha(@bg_secondary, 0.94);
+    color: @text_secondary;
+    font-family: monospace;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.viewer-favorite-indicator.favorite-on {
+    border-color: #00ff88;
+    color: #00ff88;
+}
+
 /* Status bar */
 .status-bar {
     background-color: @bg_secondary;
@@ -349,6 +370,103 @@ tooltip {
     padding: 4px 8px;
     color: @text_secondary;
     font-size: 11px;
+}
+
+/* Sidebar */
+.sidebar-scroll {
+    background-color: @bg_secondary;
+}
+
+.sidebar-panel {
+    background-color: @bg_secondary;
+}
+
+.sidebar-items {
+    margin-top: 4px;
+}
+
+button.sidebar-entry {
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: @text_secondary;
+    padding: 4px 8px;
+}
+
+button.sidebar-entry:hover {
+    background-color: alpha(@text_primary, 0.05);
+    border-color: @border_color;
+    color: @text_primary;
+}
+
+button.sidebar-entry-active {
+    border-color: @accent_primary;
+    color: @accent_primary;
+}
+
+/* TUI context menu */
+popover.context-menu-popover {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+    color: @text_primary;
+}
+
+popover.context-menu-popover > contents {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+    padding: 0;
+}
+
+.context-menu {
+    background-color: @bg_secondary;
+    border: 1px solid @border_color;
+}
+
+label.context-menu-title {
+    color: @accent_primary;
+    font-family: monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+label.context-menu-empty {
+    color: @text_muted;
+    font-family: monospace;
+}
+
+separator.context-menu-separator {
+    background-color: @border_color;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+button.context-menu-item {
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: @text_primary;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 4px 8px;
+}
+
+button.context-menu-item:hover {
+    background-color: alpha(@accent_primary, 0.10);
+    border-color: @accent_primary;
+    color: @accent_primary;
+}
+
+button.context-menu-item-checked {
+    color: @accent_primary;
+}
+
+button.context-menu-create {
+    border-style: dashed;
+    color: @accent_secondary;
+}
+
+button.context-menu-create:hover {
+    border-color: @accent_secondary;
+    background-color: alpha(@accent_secondary, 0.10);
+    color: @accent_secondary;
 }
 
 /* Error state */

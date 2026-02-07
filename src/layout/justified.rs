@@ -1,18 +1,18 @@
 use crate::models::{MediaItem, RowItem, RowModel};
 
-/// Configuration for the justified row layout algorithm.
+/// Configuration for the dense flow layout algorithm.
 ///
-/// This algorithm creates rows of images that fill the full viewport width,
-/// maintaining consistent visual density while respecting aspect ratios.
+/// Items are placed left-to-right with fixed tile height and zero spacing.
+/// Width follows source aspect ratio.
 #[derive(Debug, Clone)]
 pub struct JustifiedLayout {
     /// Target row height in pixels (default: 220)
     pub target_height: f32,
-    /// Minimum allowed row height in pixels (default: 140)
+    /// Minimum allowed row height in pixels (default: 1)
     pub min_height: f32,
-    /// Maximum allowed row height in pixels (default: 320)
+    /// Maximum allowed row height in pixels (default: 10000)
     pub max_height: f32,
-    /// Gap between items in a row in pixels (default: 2)
+    /// Gap between items in a row in pixels (default: 0)
     pub gap: f32,
 }
 
@@ -20,36 +20,35 @@ impl Default for JustifiedLayout {
     fn default() -> Self {
         Self {
             target_height: 220.0,
-            min_height: 140.0,
-            max_height: 320.0,
-            gap: 2.0,
+            min_height: 1.0,
+            max_height: 10_000.0,
+            gap: 0.0,
         }
     }
 }
 
 impl JustifiedLayout {
-    fn row_height_that_fits(
-        &self,
-        sum_ar: f32,
-        num_gaps: f32,
-        viewport_width: f32,
-        last_row: bool,
-    ) -> f32 {
-        let available_width = (viewport_width - num_gaps * self.gap).max(1.0);
-        let fit_height = (available_width / sum_ar).max(1.0);
+    fn clamp_tile_height(&self, h: f32) -> f32 {
+        h.clamp(self.min_height, self.max_height).max(1.0)
+    }
 
-        if last_row {
-            return fit_height.min(self.target_height);
+    fn tile_dimensions(&self, item: &MediaItem) -> (f32, f32) {
+        let mut ar = item.aspect_ratio().max(0.01);
+        if item.is_video() && !(0.2..=5.0).contains(&ar) {
+            // Some containers report junk dimensions; keep video tiles visible/stable in-grid.
+            ar = 16.0 / 9.0;
         }
+        let height = self.clamp_tile_height(self.target_height.max(1.0));
+        let width = (height * ar).max(1.0);
+        (width, height)
+    }
 
-        // Normal rows prefer the configured clamp range, but must never overflow.
-        let mut row_height = fit_height.clamp(self.min_height, self.max_height);
-        // Hard cap to ensure sum(widths) never exceeds available width.
-        let max_fit_height = (available_width / sum_ar).max(1.0);
-        if row_height > max_fit_height {
-            row_height = max_fit_height;
-        }
-        row_height.max(1.0)
+    fn row_wrap_limit(&self, viewport_width: f32) -> f32 {
+        viewport_width.max(1.0)
+    }
+
+    fn tile_offset_top(&self) -> f32 {
+        0.0
     }
 
     /// Creates a new JustifiedLayout with custom parameters.
@@ -63,14 +62,12 @@ impl JustifiedLayout {
         }
     }
 
-    /// Computes the justified row layout for a list of media items.
+    /// Computes a dense fixed-height flow layout for a list of media items.
     ///
     /// # Algorithm
-    /// 1. For each item in order, accumulate aspect ratios until the row would fill the viewport width.
-    /// 2. Compute row_height = (viewport_width - gaps) / sum(aspect_ratios).
-    /// 3. Clamp row_height to [min_height, max_height].
-    /// 4. Compute each item's display width as aspect_ratio * row_height.
-    /// 5. The last row uses target_height as an upper bound and may shrink to fit width.
+    /// 1. Compute per-item tile dimensions using a shared tile height.
+    /// 2. Stream items left-to-right with wrap at full viewport width.
+    /// 3. Keep inter-item spacing at zero for a continuous packed chunk.
     ///
     /// # Arguments
     /// * `items` - Slice of MediaItems to layout
@@ -84,52 +81,45 @@ impl JustifiedLayout {
         }
 
         let mut rows = Vec::new();
-        let mut row_index: u32 = 0;
-
-        // Pending items for the current row
-        let mut pending_items: Vec<&MediaItem> = Vec::new();
-        let mut sum_ar: f32 = 0.0;
+        let mut row_index = 0u32;
+        let mut pending_items: Vec<RowItem> = Vec::new();
+        let mut row_width = 0.0f32;
+        let mut row_height = 1.0f32;
+        let row_wrap_limit = self.row_wrap_limit(viewport_width);
 
         for item in items {
-            let ar = item.aspect_ratio();
-            pending_items.push(item);
-            sum_ar += ar;
-
-            // Calculate required width if we use target height
-            // Each item width = ar * target_height
-            // Total width = sum_ar * target_height + gaps
-            let num_gaps = (pending_items.len().saturating_sub(1)) as f32;
-            let required_width = sum_ar * self.target_height + num_gaps * self.gap;
-
-            // Check if this row is full (would exceed viewport width)
-            if required_width >= viewport_width {
-                // Finalize this row
-                let row = self.finalize_row(
-                    &pending_items,
-                    sum_ar,
-                    viewport_width,
-                    row_index,
-                    false, // not last row
-                );
-                rows.push(row);
-                row_index += 1;
-
-                // Reset for next row
-                pending_items.clear();
-                sum_ar = 0.0;
+            let (item_w, item_h) = self.tile_dimensions(item);
+            if !pending_items.is_empty() {
+                let required_width = row_width + self.gap + item_w;
+                if required_width > row_wrap_limit {
+                    rows.push(RowModel::new(
+                        row_index,
+                        row_height,
+                        std::mem::take(&mut pending_items),
+                    ));
+                    row_index += 1;
+                    row_width = 0.0;
+                    row_height = 1.0;
+                }
             }
+
+            let offset_top = self.tile_offset_top();
+            if !pending_items.is_empty() {
+                row_width += self.gap;
+            }
+            pending_items.push(RowItem {
+                media_path: item.path.clone(),
+                display_w: item_w,
+                display_h: item_h,
+                offset_top,
+                is_folder: item.is_folder(),
+            });
+            row_width += item_w;
+            row_height = row_height.max(item_h + offset_top);
         }
 
-        // Handle the last row (incomplete row may shrink; never exceed viewport width)
         if !pending_items.is_empty() {
-            let row = self.finalize_row(
-                &pending_items,
-                sum_ar,
-                viewport_width,
-                row_index,
-                true, // last row
-            );
-            rows.push(row);
+            rows.push(RowModel::new(row_index, row_height, pending_items));
         }
 
         rows
@@ -141,51 +131,19 @@ impl JustifiedLayout {
     /// This is useful for the layout cache to store minimal data.
     #[cfg(test)]
     pub fn compute_breaks(&self, items: &[MediaItem], viewport_width: f32) -> Vec<RowBreak> {
-        if items.is_empty() || viewport_width <= 0.0 {
-            return Vec::new();
-        }
-
-        let mut breaks = Vec::new();
-        let mut row_start: usize = 0;
-        let mut sum_ar: f32 = 0.0;
-        let mut pending_count: usize = 0;
-
-        for (idx, item) in items.iter().enumerate() {
-            let ar = item.aspect_ratio();
-            sum_ar += ar;
-            pending_count += 1;
-
-            let num_gaps = pending_count.saturating_sub(1) as f32;
-            let required_width = sum_ar * self.target_height + num_gaps * self.gap;
-
-            if required_width >= viewport_width {
-                // Compute the actual row height for this complete row
-                let row_height = self.row_height_that_fits(sum_ar, num_gaps, viewport_width, false);
-
-                breaks.push(RowBreak {
-                    start_index: row_start,
-                    end_index: idx + 1, // exclusive
-                    row_height,
-                });
-
-                row_start = idx + 1;
-                sum_ar = 0.0;
-                pending_count = 0;
-            }
-        }
-
-        // Last row (incomplete, shrink if needed to avoid overflow)
-        if pending_count > 0 {
-            let num_gaps = pending_count.saturating_sub(1) as f32;
-            let row_height = self.row_height_that_fits(sum_ar, num_gaps, viewport_width, true);
-            breaks.push(RowBreak {
-                start_index: row_start,
-                end_index: items.len(),
-                row_height,
+        let rows = self.compute(items, viewport_width);
+        let mut start = 0usize;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let end = start + row.items.len();
+            out.push(RowBreak {
+                start_index: start,
+                end_index: end,
+                row_height: row.height_px,
             });
+            start = end;
         }
-
-        breaks
+        out
     }
 
     /// Reconstructs rows from cached breaks without re-running the layout algorithm.
@@ -196,52 +154,26 @@ impl JustifiedLayout {
             .iter()
             .enumerate()
             .map(|(row_idx, brk)| {
+                let mut row_height = 1.0f32;
                 let row_items: Vec<RowItem> = items[brk.start_index..brk.end_index]
                     .iter()
                     .map(|item| {
-                        let ar = item.aspect_ratio();
+                        let (item_w, item_h) = self.tile_dimensions(item);
+                        let offset_top = self.tile_offset_top();
+                        row_height = row_height.max(item_h + offset_top);
                         RowItem {
                             media_path: item.path.clone(),
-                            display_w: ar * brk.row_height,
-                            display_h: brk.row_height,
+                            display_w: item_w,
+                            display_h: item_h,
+                            offset_top,
                             is_folder: item.is_folder(),
                         }
                     })
                     .collect();
 
-                RowModel::new(row_idx as u32, brk.row_height, row_items)
+                RowModel::new(row_idx as u32, row_height.max(brk.row_height), row_items)
             })
             .collect()
-    }
-
-    /// Finalizes a row by computing the actual row height and item dimensions.
-    fn finalize_row(
-        &self,
-        pending_items: &[&MediaItem],
-        sum_ar: f32,
-        viewport_width: f32,
-        row_index: u32,
-        is_last_row: bool,
-    ) -> RowModel {
-        let num_gaps = (pending_items.len().saturating_sub(1)) as f32;
-
-        let row_height = self.row_height_that_fits(sum_ar, num_gaps, viewport_width, is_last_row);
-
-        // Compute each item's display dimensions
-        let row_items: Vec<RowItem> = pending_items
-            .iter()
-            .map(|item| {
-                let ar = item.aspect_ratio();
-                RowItem {
-                    media_path: item.path.clone(),
-                    display_w: ar * row_height,
-                    display_h: row_height,
-                    is_folder: item.is_folder(),
-                }
-            })
-            .collect();
-
-        RowModel::new(row_index, row_height, row_items)
     }
 
     /// Calculates the total height of all rows.
@@ -307,93 +239,49 @@ mod tests {
         let rows = layout.compute(&items, 1920.0);
 
         assert_eq!(rows.len(), 1);
-        // Single item in last row uses target height
-        assert!((rows[0].height_px - layout.target_height).abs() < 0.01);
+        let (_, expected_h) = layout.tile_dimensions(&items[0]);
+        assert!((rows[0].height_px - expected_h).abs() < 0.01);
     }
 
     #[test]
     fn test_multiple_rows() {
         let layout = JustifiedLayout::default();
-        // Create items that will fill multiple rows with an incomplete last row
-        // 16:9 aspect ratio items (ar = 1.78)
-        // With viewport 1920 and target 220, about 4.9 items fit per row
-        // So 5 items = 1 complete row, 7 items = 1 complete + 2 incomplete
-        let items: Vec<MediaItem> = (0..7)
+        let items: Vec<MediaItem> = (0..12)
             .map(|i| make_item(&format!("{}.jpg", i), 1920, 1080))
             .collect();
 
         let rows = layout.compute(&items, 1920.0);
 
-        // Should have multiple rows (1 complete + 1 incomplete)
         assert!(rows.len() > 1, "Expected > 1 rows, got {}", rows.len());
-
-        // All rows except last should have height in valid range
-        for (i, row) in rows[..rows.len() - 1].iter().enumerate() {
-            assert!(
-                row.height_px >= layout.min_height,
-                "Row {} height {} < min {}",
-                i,
-                row.height_px,
-                layout.min_height
-            );
-            assert!(
-                row.height_px <= layout.max_height,
-                "Row {} height {} > max {}",
-                i,
-                row.height_px,
-                layout.max_height
-            );
-        }
-
-        // Last row uses target height (since it's incomplete)
-        let last_row = rows.last().unwrap();
-        assert!(
-            (last_row.height_px - layout.target_height).abs() < 0.01,
-            "Last row height {} != target {}",
-            last_row.height_px,
-            layout.target_height
-        );
+        let total_items: usize = rows.iter().map(|r| r.items.len()).sum();
+        assert_eq!(total_items, items.len());
     }
 
     #[test]
     fn test_exact_row_fill() {
         let layout = JustifiedLayout::default();
-        // With 10 items at 16:9 and viewport 1920, we get exactly 2 complete rows
-        // Both rows should be complete, so both should have computed height (not target)
         let items: Vec<MediaItem> = (0..10)
             .map(|i| make_item(&format!("{}.jpg", i), 1920, 1080))
             .collect();
 
         let rows = layout.compute(&items, 1920.0);
 
-        // Should have exactly 2 rows
-        assert_eq!(rows.len(), 2);
-
-        // Both rows are complete, so both should have height within clamp range
-        for row in &rows {
-            assert!(row.height_px >= layout.min_height);
-            assert!(row.height_px <= layout.max_height);
-        }
+        assert!(rows.len() > 1);
+        let total_items: usize = rows.iter().map(|r| r.items.len()).sum();
+        assert_eq!(total_items, items.len());
     }
 
     #[test]
-    fn test_incomplete_row_panoramas_do_not_overflow_viewport() {
+    fn test_panorama_keeps_uniform_height() {
         let layout = JustifiedLayout::default();
-        let viewport = 1200.0;
+        let viewport = 3000.0;
         let items = vec![make_item("pano.jpg", 12000, 1000)];
         let rows = layout.compute(&items, viewport);
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
-        let total_width: f32 = row.items.iter().map(|i| i.display_w).sum();
         assert!(
-            total_width <= viewport + 0.5,
-            "row width {} exceeded viewport {}",
-            total_width,
-            viewport
-        );
-        assert!(
-            row.height_px < layout.target_height,
-            "expected panorama last row to shrink below target height"
+            (row.height_px - layout.target_height).abs() < 0.01,
+            "expected panorama tile height to stay at target height"
         );
     }
 
@@ -452,6 +340,13 @@ mod tests {
         // Verify all items are accounted for
         let total_items: usize = rows.iter().map(|r| r.items.len()).sum();
         assert_eq!(total_items, items.len());
+
+        // All tiles should have a uniform height.
+        for row in &rows {
+            for item in &row.items {
+                assert!((item.display_h - layout.target_height).abs() < 0.01);
+            }
+        }
     }
 
     #[test]
@@ -471,13 +366,23 @@ mod tests {
 
         let rows = layout.compute(&items, 1920.0);
 
-        for row in &rows[..rows.len().saturating_sub(1)] {
+        for row in &rows {
             assert!(
                 row.height_px >= layout.min_height,
                 "Row height {} below min {}",
                 row.height_px,
                 layout.min_height
             );
+            for item in &row.items {
+                assert!(
+                    item.display_h >= layout.min_height && item.display_h <= layout.max_height,
+                    "Item height {} outside [{}, {}]",
+                    item.display_h,
+                    layout.min_height,
+                    layout.max_height
+                );
+                assert!(item.offset_top >= 0.0);
+            }
         }
     }
 }
