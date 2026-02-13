@@ -1654,16 +1654,14 @@ impl MediaViewer {
         }
 
         let viewer_weak = self.downgrade();
-        let source_id = glib::timeout_add_local(
-            std::time::Duration::from_millis(delay_ms),
-            move || {
+        let source_id =
+            glib::timeout_add_local(std::time::Duration::from_millis(delay_ms), move || {
                 if let Some(viewer) = viewer_weak.upgrade() {
                     viewer.imp().full_decode_idle_timer.borrow_mut().take();
                     viewer.enqueue_full_decode_for_generation(generation);
                 }
                 glib::ControlFlow::Break
-            },
-        );
+            });
         *self.imp().full_decode_idle_timer.borrow_mut() = Some(source_id);
     }
 
@@ -1705,10 +1703,7 @@ impl MediaViewer {
             .wrapping_add(1);
 
         for item in items {
-            if tx
-                .try_send(PrefetchWorkItem { item, generation })
-                .is_err()
-            {
+            if tx.try_send(PrefetchWorkItem { item, generation }).is_err() {
                 break;
             }
         }

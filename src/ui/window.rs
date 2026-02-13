@@ -30,7 +30,7 @@ use crate::models::{MediaItem, MediaStore, MediaType, RowModel};
 use crate::scanner::file_scanner::{FileScanner, ScanConfig};
 
 const SMALL_IMAGE_MAX_PIXELS: u64 = 2_000_000;
-const PREFETCH_RADIUS: usize = 12;
+const PREFETCH_RADIUS: usize = 24;
 const PREFETCH_PRIORITY_COUNT: usize = 8;
 const DIALOG_MARGIN: i32 = 12;
 const SIDEBAR_WIDTH_RATIO: f32 = 0.20;
@@ -272,6 +272,7 @@ pub struct MainWindow {
     base_items: RefCell<Vec<MediaItem>>,
     media_store: RefCell<Option<MediaStore>>,
     pending_viewer_target: RefCell<Option<PathBuf>>,
+    grid_scroll_before_viewer: Cell<f64>,
 }
 
 impl MainWindow {
@@ -578,6 +579,7 @@ impl MainWindow {
             base_items: RefCell::new(Vec::new()),
             media_store: RefCell::new(media_store),
             pending_viewer_target: RefCell::new(None),
+            grid_scroll_before_viewer: Cell::new(0.0),
         });
         *main_window.self_weak.borrow_mut() = Rc::downgrade(&main_window);
         main_window.rebuild_sidebar();
@@ -832,9 +834,7 @@ impl MainWindow {
         let window_weak = Rc::downgrade(self);
         self.viewer.connect_close(move || {
             if let Some(window) = window_weak.upgrade() {
-                window.keybindings.set_view_mode(ViewMode::Grid);
-                window.stack.set_visible_child_name("grid");
-                window.update_status_for_selection();
+                window.close_viewer();
             }
         });
 
@@ -870,9 +870,15 @@ impl MainWindow {
     /// Open the viewer for a media item
     fn open_viewer(&self, path: &Path) {
         tracing::info!("Opening viewer for: {}", path.display());
+        self.grid_scroll_before_viewer
+            .set(self.list_view.scroll_value());
         if let Some(texture) = cached_row_preview_texture(path) {
-            let (mut orig_w, mut orig_h) =
-                self.media_dims.borrow().get(path).copied().unwrap_or((0, 0));
+            let (mut orig_w, mut orig_h) = self
+                .media_dims
+                .borrow()
+                .get(path)
+                .copied()
+                .unwrap_or((0, 0));
             if orig_w == 0 || orig_h == 0 {
                 if let Ok((w, h)) = crate::image_loader::read_dimensions(path) {
                     orig_w = w;
@@ -971,6 +977,16 @@ impl MainWindow {
 
         self.viewer.hide();
         self.stack.set_visible_child_name("grid");
+        let target_scroll = self.grid_scroll_before_viewer.get();
+        self.list_view.set_scroll_value(target_scroll);
+        let list_view = self.list_view.clone();
+        glib::idle_add_local_once(move || {
+            list_view.set_scroll_value(target_scroll);
+        });
+        let list_view = self.list_view.clone();
+        glib::timeout_add_local_once(Duration::from_millis(32), move || {
+            list_view.set_scroll_value(target_scroll);
+        });
         self.update_status_for_selection();
     }
 

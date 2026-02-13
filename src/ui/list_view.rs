@@ -296,6 +296,19 @@ impl MediaListView {
         vadj.set_value(position.min(max_pos));
     }
 
+    /// Current vertical scroll offset in pixels.
+    pub fn scroll_value(&self) -> f64 {
+        self.scrolled_window.vadjustment().value()
+    }
+
+    /// Restore vertical scroll offset (clamped to current bounds).
+    pub fn set_scroll_value(&self, value: f64) {
+        let vadj = self.scrolled_window.vadjustment();
+        let max_pos = (vadj.upper() - vadj.page_size()).max(0.0);
+        let clamped = value.clamp(0.0, max_pos);
+        vadj.set_value(clamped);
+    }
+
     /// Set up a callback for when visible range changes
     pub fn connect_visible_range_changed<F>(&self, callback: F)
     where

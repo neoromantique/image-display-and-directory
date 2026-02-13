@@ -25,6 +25,19 @@ const JPEG_QUALITY: u8 = 85;
 /// Thumbnail generator that creates resized images for caching.
 pub struct ThumbnailGenerator;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeMode {
+    Quality,
+    Fast,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThumbnailStageTimings {
+    pub decode_ms: f64,
+    pub resize_ms: f64,
+    pub encode_ms: f64,
+}
+
 /// Result of thumbnail generation containing dimensions.
 #[derive(Debug, Clone, Copy)]
 pub struct ThumbnailResult {
@@ -53,10 +66,24 @@ impl ThumbnailGenerator {
         dst: &Path,
         target_height: u32,
     ) -> Result<ThumbnailResult> {
+        let (result, _) =
+            Self::generate_thumbnail_with_mode(src, dst, target_height, ResizeMode::Quality)?;
+        Ok(result)
+    }
+
+    /// Generate a thumbnail with selectable quality/speed mode and stage timings.
+    pub fn generate_thumbnail_with_mode(
+        src: &Path,
+        dst: &Path,
+        target_height: u32,
+        mode: ResizeMode,
+    ) -> Result<(ThumbnailResult, ThumbnailStageTimings)> {
+        let decode_start = std::time::Instant::now();
         debug!(?src, ?dst, target_height, "Generating thumbnail");
 
         // Load the source image
         let img = Self::load_image(src)?;
+        let decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
         let (src_width, src_height) = img.dimensions();
 
         // Calculate target dimensions preserving aspect ratio
@@ -69,8 +96,13 @@ impl ThumbnailGenerator {
         );
 
         // Resize the image using a high-quality filter
-        // CatmullRom provides good quality/speed balance for downscaling
-        let thumbnail = img.resize_exact(thumb_width, thumb_height, FilterType::CatmullRom);
+        let resize_start = std::time::Instant::now();
+        let filter = match mode {
+            ResizeMode::Quality => FilterType::CatmullRom,
+            ResizeMode::Fast => FilterType::Triangle,
+        };
+        let thumbnail = img.resize_exact(thumb_width, thumb_height, filter);
+        let resize_ms = resize_start.elapsed().as_secs_f64() * 1000.0;
 
         // Ensure the parent directory exists
         if let Some(parent) = dst.parent() {
@@ -79,12 +111,21 @@ impl ThumbnailGenerator {
         }
 
         // Save the thumbnail
+        let encode_start = std::time::Instant::now();
         Self::save_thumbnail(&thumbnail, dst)?;
+        let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(ThumbnailResult {
-            width: thumb_width,
-            height: thumb_height,
-        })
+        Ok((
+            ThumbnailResult {
+                width: thumb_width,
+                height: thumb_height,
+            },
+            ThumbnailStageTimings {
+                decode_ms,
+                resize_ms,
+                encode_ms,
+            },
+        ))
     }
 
     /// Load an image from disk, handling various formats.

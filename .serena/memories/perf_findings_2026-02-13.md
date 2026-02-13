@@ -1,0 +1,17 @@
+# Performance findings (concise)
+- Primary bottleneck: thumbnail generation pipeline (cold runs), not layout/scanner.
+- Warm-cache runs are fast and can hide real thumbnail-generation cost.
+- Best sweep result on this host: workers=8, visible=24, fast_resize=true; offload flag ranked slightly better but real offload backend is still scaffolded.
+- Implemented app UX fixes:
+  - preserve grid scroll position when entering/exiting viewer
+  - keep scrolling responsive during thumbnail loading by capping main-thread result processing per tick
+  - increased row preview throughput and fast resize path
+  - prefetch radius increased to 24
+- Implemented benchmark system upgrades:
+  - staged visible-first measurement with time_to_visible
+  - configurable workers/visible/fast resize/timeouts/offload flag
+  - per-stage timings: queue wait, worker, decode, resize, encode
+  - GPU telemetry fallback to nvidia-smi when sysfs lacks data
+  - automated sweep script + CSV ranking
+- Key caveat: --thumb-nv-offload currently reports scaffold metrics; no production GPU decode/resize backend is wired yet.
+- Reference doc: docs/performance-findings-2026-02-13.md

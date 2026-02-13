@@ -9,6 +9,7 @@ use gtk4::{
     gdk, glib, Align, Box as GtkBox, ContentFit, GestureClick, Label, Orientation, Overlay,
     Picture, Widget,
 };
+use image::imageops::FilterType;
 use image::GenericImageView;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -25,10 +26,22 @@ use std::time::Duration;
 use crate::models::RowModel;
 
 const ROW_PREVIEW_SIZE: u32 = 512;
-const ROW_LOADER_THREADS: usize = 2;
+const ROW_LOADER_MAX_THREADS: usize = 8;
+const ROW_LOADER_MIN_THREADS: usize = 2;
 const ROW_LOADER_QUEUE: usize = 512;
 const ROW_CACHE_ENTRIES: usize = 1024;
+const ROW_RESULTS_PER_TICK: usize = 12;
 const VIDEO_PREVIEW_START_SECS: [f64; 2] = [1.0, 0.0];
+
+fn row_loader_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| {
+            n.get()
+                .saturating_sub(2)
+                .clamp(ROW_LOADER_MIN_THREADS, ROW_LOADER_MAX_THREADS)
+        })
+        .unwrap_or(4)
+}
 
 // Placeholder texture - generated once and reused
 fn placeholder_texture() -> &'static Texture {
@@ -198,7 +211,7 @@ impl RowImageLoader {
         let (result_tx, result_rx) = flume::unbounded::<RowDecodeResult>();
         let generation = std::sync::Arc::new(AtomicU64::new(1));
 
-        for _ in 0..ROW_LOADER_THREADS {
+        for _ in 0..row_loader_threads() {
             let rx = request_rx.clone();
             let tx = result_tx.clone();
             let generation = generation.clone();
@@ -301,7 +314,10 @@ impl RowImageLoader {
     }
 
     fn process_results(&self) {
-        while let Ok(result) = self.result_rx.try_recv() {
+        for _ in 0..ROW_RESULTS_PER_TICK {
+            let Ok(result) = self.result_rx.try_recv() else {
+                break;
+            };
             let texture = result
                 .rgba
                 .and_then(|rgba| create_texture_from_rgba(rgba, result.width, result.height));
@@ -343,7 +359,18 @@ fn decode_row_preview(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
     } else {
         crate::image_loader::open_image(path).ok()?
     };
-    let resized = img.thumbnail(ROW_PREVIEW_SIZE, ROW_PREVIEW_SIZE);
+    let (src_w, src_h) = img.dimensions();
+    let resized = if src_w <= ROW_PREVIEW_SIZE && src_h <= ROW_PREVIEW_SIZE {
+        img
+    } else {
+        // Fast resize path tuned for smooth grid scrolling.
+        let scale_w = ROW_PREVIEW_SIZE as f32 / src_w as f32;
+        let scale_h = ROW_PREVIEW_SIZE as f32 / src_h as f32;
+        let scale = scale_w.min(scale_h);
+        let new_w = ((src_w as f32 * scale).round() as u32).max(1);
+        let new_h = ((src_h as f32 * scale).round() as u32).max(1);
+        img.resize_exact(new_w, new_h, FilterType::Triangle)
+    };
     let (width, height) = resized.dimensions();
     let rgba = resized.to_rgba8().into_raw();
     Some((rgba, width.max(1), height.max(1)))

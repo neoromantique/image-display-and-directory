@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod app;
+mod bench;
 mod image_loader;
 mod layout;
 mod models;
@@ -23,6 +24,21 @@ fn main() {
                 .add_directive("idxd=info".parse().unwrap()),
         )
         .init();
+
+    match bench::maybe_parse_args() {
+        Ok(Some(args)) => match bench::run_benchmark(args) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("Benchmark failed: {e:#}");
+                std::process::exit(1);
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Invalid benchmark arguments: {e:#}");
+            std::process::exit(2);
+        }
+    }
 
     let app = IdxdApp::new();
     std::process::exit(app.run());
